@@ -1,0 +1,31 @@
+# OS-generated junk
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS archive metadata
+__MACOSX/
+
+# Generated diagrams
+*.html
+*.svg
+
+# Generated Excel outputs and temporary/lock files
+*.xls
+*.xlsm
+*.xlsb
+*.xltx
+*.xltm
+*.tmp.xlsx
+~$*.xlsx
+
+# Ignore all xlsx by default...
+*.xlsx
+# ...but keep the provided example workbook
+!free-all-fta-example.xlsx
