@@ -643,6 +643,21 @@ def _safe_eval(expr):
         if hasattr(_ast, 'Num') and isinstance(n, _ast.Num): return float(n.n)
         if isinstance(n, _ast.BinOp) and type(n.op) in _BIN: return _BIN[type(n.op)](ev(n.left), ev(n.right))
         if isinstance(n, _ast.UnaryOp) and type(n.op) in _UN: return _UN[type(n.op)](ev(n.operand))
+        if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name):
+            name = n.func.id.upper()
+            args = [ev(a) for a in n.args]
+            if name == 'MIN': return min(args)
+            if name == 'MAX': return max(args)
+            if name == 'SUM': return sum(args)
+            if name == 'PRODUCT':
+                out = 1.0
+                for a in args: out *= a
+                return out
+            if name == 'EXP' and len(args) == 1: return math.exp(args[0])
+            if name == 'ABS' and len(args) == 1: return abs(args[0])
+            if name == 'POWER' and len(args) == 2: return args[0] ** args[1]
+            if name == 'SQRT' and len(args) == 1: return math.sqrt(args[0])
+            if name == 'ROUND' and len(args) == 2: return round(args[0], int(args[1]))
         raise ValueError(type(n).__name__)
     return ev(_ast.parse(expr, mode='eval'))
 
@@ -693,7 +708,7 @@ def _replace_defined_names_in_expr(wbf, wbv, expr, memo=None):
         return expr
     function_names = {
         'IF', 'IFERROR', 'VALUE', 'SUBSTITUTE', 'SUM', 'PRODUCT', 'MIN', 'MAX',
-        'AND', 'OR', 'NOT', 'TRUE', 'FALSE', 'ABS', 'ROUND', 'POWER', 'SQRT'
+        'AND', 'OR', 'NOT', 'TRUE', 'FALSE', 'ABS', 'ROUND', 'POWER', 'SQRT', 'EXP'
     }
 
     def repl(m):
@@ -719,10 +734,14 @@ def _eval_cell(wbf, wbv, sheet, row, col, memo=None):
     key = (sheet, row, col)
     if key in memo: return memo[key]
     cached = wbv[sheet].cell(row, col).value
+    if hasattr(cached, 'text'):
+        cached = None
     if cached not in (None, ''):
         memo[key] = cached; return cached
     ws = wbf[sheet]
     raw = ws.cell(row, col).value
+    if hasattr(raw, 'text'):
+        raw = raw.text
     if raw is None or raw == '' or not (isinstance(raw, str) and raw.startswith('=')):
         memo[key] = raw; return raw
     expr = raw[1:]
@@ -960,21 +979,26 @@ def _diagram_data(xlsx, pure=False):
             existing_q = as_num(gates[gid].get('q'))
             existing_w = as_num(gates[gid].get('w'))
             existing_t = as_num(gates[gid].get('sdt'))
-            if existing_q is None or (existing_q == 0 and qv not in (None, 0)):
-                gates[gid]['q'] = qv
-            # Always prefer a meaningful pure fallback w when it differs from
-            # a capped-q/T artefact; this affects --pure diagrams only.
-            if wv not in (None, 0):
-                gates[gid]['w'] = wv
-            elif existing_w is None:
-                gates[gid]['w'] = wv
-            if existing_t is None or (existing_t == 0 and tv not in (None, 0)):
-                gates[gid]['sdt'] = tv
+
+            # In --pure diagrams, display the values from the pure workbook
+            # gates sheet whenever available:
+            #   calculated probability      -> q
+            #   calculated frequency        -> w
+            #   calculated mean repair time -> t
+            # The recursive calculation below is only a fallback when a gate
+            # cell has no cached/evaluable numeric value.
+            gates[gid]['q'] = existing_q if existing_q is not None else qv
+            gates[gid]['w'] = existing_w if existing_w is not None else wv
+            gates[gid]['sdt'] = existing_t if existing_t is not None else tv
+
+            sel_w = as_num(gates[gid].get('w'))
+            sel_t = as_num(gates[gid].get('sdt'))
+            selected_raw_q = (sel_w * sel_t) if (sel_w is not None and sel_t not in (None, 0)) else gate_raw_q
             pure_done[gid] = (
                 as_num(gates[gid].get('q')),
-                as_num(gates[gid].get('w')),
-                as_num(gates[gid].get('sdt')),
-                gate_raw_q,
+                sel_w,
+                sel_t,
+                selected_raw_q,
             )
             return pure_done[gid]
 

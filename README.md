@@ -184,14 +184,178 @@ The tool expects these sheets to exist:
 - `gates`
 - `tree`
 
+## Columns Used Per Calculation Mode
+
+Both modes use the same workbook sheets (`events`, `gates`, `tree`).
+
+### Markov mode (`--markov`, default)
+
+Used columns in `events`:
+
+- `id`
+- `model_type`
+- `allocated value`
+- `mean_repair_time`
+
+Used columns in `gates`:
+
+- `id`
+- `formula`
+- `safety target` (used for top-down target propagation and `differences`)
+- `calculated frequency`
+- `calculated mean repair time`
+- `differences`
+
+Used columns in `tree`:
+
+- `L1_ID`, `L2_ID`, ... (hierarchy)
+- Optional: `L1_TYPE`, `L2_TYPE`, ... with gate types `AND`/`OR`
+
+### Pure mode (`--pure`)
+
+Used columns in `events`:
+
+- `id`
+- `model_type`
+- `allocated value`
+- `mean_repair_time`
+- Optional for `Probability` model: `probability` (if missing, `allocated value` is used)
+
+Used columns in `gates`:
+
+- `id`
+- `formula`
+- `calculated frequency`
+- `calculated mean repair time`
+- `calculated probability`
+- Optional: `safety target` and `differences` (if present, `differences` is computed)
+
+Used columns in `tree`:
+
+- `L1_ID`, `L2_ID`, ... (hierarchy)
+- Optional: `L1_TYPE`, `L2_TYPE`, ... with gate types `AND`/`OR`
+
+## How Formulas Are Built Per Mode
+
+This section explains, for each mode, which inputs are used to build formulas and how gate outputs are calculated.
+
+### Markov mode (`--markov`, default)
+
+Event-level interpretation:
+
+- `ConstantRate` / `Fixed`:
+	- `allocated value` is interpreted as rate `lambda`.
+	- `mean_repair_time` is interpreted as `T`.
+- `Probability` / `Multiplicity`:
+	- `allocated value` is used as a multiplicative factor.
+- `True` / `False`:
+	- factor `1` / `0`.
+
+Gate formulas:
+
+- `AND` gate:
+	- With multiple rate children:
+		- `calculated frequency = product(lambda_i * T_i) * sum(1 / T_i) * product(factors)`
+		- `calculated mean repair time = 1 / sum(1 / T_i)`
+		The hazardous state exists only when all child states are simultaneously present. The overlap duration is governed by the shortest restoration process. The harmonic combination: `TEQ = 1 / Σ(1/Ti)` preserves the expected overlap duration.
+	- With one rate child:
+		- `calculated frequency = lambda_1 * product(factors)`
+		- `calculated mean repair time = T_1`
+	- With only factor children:
+		- `calculated frequency = product(factors)`
+		- `calculated mean repair time` is empty.
+
+- `OR` gate:
+	- `calculated frequency = sum(rate children lambdas) + sum(factor children)`
+	- `calculated mean repair time = sum(lambda_i * T_i) / sum(lambda_i)`
+		- Computed from rate children only. Any child failure can independently create the hazardous state. The gate occurrence rate is therefore the sum of child occurrence rates. The equivalent duration must preserve: `QEQ = λEQ · TEQ`. Therefore the duration is the rate-weighted average persistence time.
+
+Safety-target propagation and difference:
+
+- Along `AND` chains where a parent has exactly one child gate:
+	- `child safety target = parent safety target / product(event child allocated value)`
+- `differences = safety target - calculated frequency`
+
+Which inputs each calculated gate column depends on:
+
+- `calculated frequency`:
+	- `events.model_type`
+	- `events.allocated value`
+	- `events.mean_repair_time` (for rate-based children)
+	- `tree.Lx_ID`, `tree.Lx_TYPE`
+- `calculated mean repair time`:
+	- `events.mean_repair_time` (for rate-based children)
+	- `events.allocated value` (for OR weighted average)
+	- `tree.Lx_ID`, `tree.Lx_TYPE`
+- `differences`:
+	- `gates.safety target`
+	- `gates.calculated frequency`
+
+### Pure mode (`--pure`)
+
+Event-level interpretation:
+
+- `ConstantRate` / `Fixed`:
+	- `lambda = allocated value`
+	- `T = mean_repair_time`
+	- event probability contribution `q_i = 1 - EXP(-(lambda * T))`
+	- event frequency contribution `w_i = lambda`
+- `Probability`:
+	- `q_i = probability` when the `probability` column exists, otherwise `q_i = allocated value`.
+- `Multiplicity`:
+	- `q_i = allocated value` as a factor in gate probability expressions.
+- `True` / `False`:
+	- `q_i = 1` / `0`.
+
+Gate formulas:
+
+- `AND` gate:
+	- `calculated probability = MIN(1, product(q_i))`
+	- `calculated mean repair time = MAX(T_i)`.
+	The probability of the hazardous condition is directly computed from the child probabilities. There is no physical rate-weighting mechanism as in Markov theory. A weighted average duration has no probabilistic meaning. The longest child duration is the most representative persistence horizon. Using: `TEQ = MAX(Ti)` is conservative and avoids artificially increasing: `wEQ`
+	- `calculated frequency = raw_product(q_i) / MAX(T_i)`
+		- Uses raw (uncapped) probability expression for frequency.
+
+- `OR` gate:
+	- `calculated probability = MIN(1, sum(q_i))`
+	- `calculated mean repair time = MAX(T_i)`.
+	The conjunction probability is obtained directly from the child probabilities.No Markov overlap-duration computation is involved. There is no unique mathematically derived equivalent duration.Using: `MAX(Ti)` provides a conservative exposure duration and keeps the interpretation identical to OR gates. It also avoids mixing probabilistic calculations with Markov-derived duration formulas.
+	- `calculated frequency = sum(w_i)` for rate/gate branches
+		- This avoids deriving frequency from a capped probability.
+
+Difference in pure mode:
+
+- If `safety target` and `differences` columns are present:
+	- `differences = safety target - calculated frequency`
+
+Which inputs each calculated gate column depends on:
+
+- `calculated probability`:
+	- `events.model_type`
+	- `events.allocated value`
+	- `events.probability` (optional, only for `Probability` model)
+	- `events.mean_repair_time` (for rate-to-probability conversion)
+	- `tree.Lx_ID`, `tree.Lx_TYPE`
+- `calculated mean repair time`:
+	- `events.mean_repair_time` (for rate/gate branches)
+	- `tree.Lx_ID`, `tree.Lx_TYPE`
+- `calculated frequency`:
+	- `events.allocated value`
+	- `events.mean_repair_time`
+	- child gate `calculated frequency` and `calculated mean repair time`
+	- `tree.Lx_ID`, `tree.Lx_TYPE`
+
 ### `events` required columns
 
 - `id`
 - `model_type`
-- `detection_time` for `ConstantRate` or `Fixed` model_type
-- `negation_time` for `ConstantRate` or `Fixed` model_type
-- `Allocated value` for `ConstantRate` or `Fixed` model_type
-- `mean_repair_time` for `ConstantRate` or `Fixed` model_type, it is automatically calculated based on `detection_time` and `negation_time`
+- `allocated value`
+- `mean_repair_time`
+
+Additional notes:
+
+- In pure mode, if `model_type` is `Probability`, the `probability` column is used when present (otherwise `allocated value` is used).
+- `detection_time` / `negation_time` are not directly required by the calculation engine; they can still be part of your workbook if you use them to derive `mean_repair_time`.
 
 Optional but used when present:
 
@@ -200,7 +364,14 @@ Optional but used when present:
 ### `gates` required columns
 
 - `id`
-- `safety target` (used for differences and target propagation): provide a safety target for the top gate (the one gate at the top of your tree)
+- `formula`
+- `calculated frequency`
+- `calculated mean repair time`
+
+Mode-specific notes:
+
+- Markov mode also uses `safety target` and `differences`.
+- Pure mode also uses `calculated probability`; `safety target`/`differences` are optional but used when present.
 
 The script creates/updates these columns as needed:
 
