@@ -152,6 +152,12 @@ python3 free-all-fta.py <excel-file> [options]
 python free-all-fta.py free-all-fta-example.xlsx --diag
 ```
 
+equivalent of:
+
+```bash
+python free-all-fta.py free-all-fta-example.xlsx --diag --markov
+```
+
 ### Pure probability output + diagrams with default naming
 
 ```bash

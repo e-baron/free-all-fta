@@ -995,7 +995,9 @@ class FtaSvg:
             self.children, self.gtypes, self.erows, self.grows, self.events, self.gates, self.roots = data
             self.pure = False
         self.page_files = page_files
-        self.pos = {}; self.svg = []
+        self.pos = {}
+        self.svg = []
+
     def width_of(self, node, root):
         if node in self.grows:
             if self.gates.get(node,{}).get('is_page') and node != root: return _GATE_W + 30
@@ -1003,31 +1005,42 @@ class FtaSvg:
             if not kids: return _GATE_W + 30
             return max(_GATE_W + 30, sum(self.width_of(k, root) for k in kids) + _NODE_GAP*(len(kids)-1))
         return _GATE_W + 30
-    def layout_gate(self, gid, x0, width, y, root):
+
+    def _child_path(self, parent_path, idx, child_id):
+        return parent_path + ((idx, child_id),)
+
+    def layout_gate(self, gid, x0, width, y, root, path=None):
+        if path is None:
+            path = ((0, gid),)
         cx = x0 + width/2
-        self.pos[('gate',gid)] = (cx-_GATE_W/2, y, _GATE_W, _TITLE_H+_ID_H+8)
+        self.pos[('gate', path)] = (cx-_GATE_W/2, y, _GATE_W, _TITLE_H+_ID_H+8)
         if gid in self.children:
-            self.pos[('op',gid)] = (cx-_OP_W/2, y+_TITLE_H+_ID_H+26, _OP_W, _OP_H)
+            self.pos[('op', path)] = (cx-_OP_W/2, y+_TITLE_H+_ID_H+26, _OP_W, _OP_H)
             kids = self.children.get(gid, [])
             widths = [self.width_of(k, root) for k in kids]
             total = sum(widths) + _NODE_GAP*max(0,len(widths)-1)
             cur = cx - total/2
             child_y = y + _TITLE_H + _ID_H + 26 + _OP_H + _LEVEL_GAP
-            for k,w in zip(kids,widths):
+            for i,(k,w) in enumerate(zip(kids,widths)):
+                child_path = self._child_path(path, i, k)
                 if k in self.grows and not (self.gates.get(k,{}).get('is_page') and k != root):
-                    self.layout_gate(k, cur, w, child_y, root)
+                    self.layout_gate(k, cur, w, child_y, root, child_path)
                 else:
-                    self.pos[('leaf',k)] = (cur+w/2-_GATE_W/2, child_y, _GATE_W, _TITLE_H+_ID_H+_EVENT_VALUE_H+30)
+                    self.pos[('leaf', child_path)] = (cur+w/2-_GATE_W/2, child_y, _GATE_W, _TITLE_H+_ID_H+_EVENT_VALUE_H+30)
                 cur += w + _NODE_GAP
+
     def render(self, root, filepath):
+        self.pos = {}
         total = self.width_of(root, root)
-        self.layout_gate(root, 40, total, 40, root)
+        root_path = ((0, root),)
+        self.layout_gate(root, 40, total, 40, root, root_path)
         maxx = max(x+w for x,y,w,h in self.pos.values())+60; maxy = max(y+h for x,y,w,h in self.pos.values())+80
         self.svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{maxx:.0f}" height="{maxy:.0f}" viewBox="0 0 {maxx:.0f} {maxy:.0f}">',
                     f'<style>text{{font-family:{_FONT};font-size:14px}} .small{{font-size:11px}} .val{{font-size:13px;font-weight:bold}}</style>']
-        self.draw_gate(root, root)
+        self.draw_gate(root, root, root_path)
         self.svg.append('</svg>')
         Path(filepath).write_text('\n'.join(self.svg), encoding='utf-8')
+
     def esc(self,s): return _html.escape(str(s))
     def rect(self,x,y,w,h): self.svg.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" fill="{_FILL}" stroke="{_STROKE}" stroke-width="1.5"/>')
     def line(self,x1,y1,x2,y2): self.svg.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{_STROKE}" stroke-width="1.4"/>')
@@ -1074,10 +1087,6 @@ class FtaSvg:
     def event_lines(self,eid):
         e=self.events.get(eid,{}); mt=e.get('model','Unknown')
         if getattr(self,'pure',False):
-            # Pure diagram display depends on event model_type:
-            #   ConstantRate / Fixed -> q, w, t
-            #   Probability          -> q only
-            #   Multiplicity         -> m only, no unit
             if mt in ('ConstantRate','Fixed'):
                 w0=_num(e.get('alloc')); t0=_num(e.get('mrt'))
                 q=_fmt((1.0 - math.exp(-(w0*t0))) if w0 is not None and t0 is not None else None)
@@ -1094,10 +1103,8 @@ class FtaSvg:
             if mt == 'Multiplicity':
                 m=_fmt(e.get('alloc'))
                 return ['m = '+m] if m else [mt]
-            if mt == 'True':
-                return ['q = 1']
-            if mt == 'False':
-                return ['q = 0']
+            if mt == 'True': return ['q = 1']
+            if mt == 'False': return ['q = 0']
             q=_fmt(e.get('prob')) or _fmt(e.get('alloc'))
             return ['q = '+q] if q else [mt]
         if mt in ('ConstantRate','Fixed'):
@@ -1115,78 +1122,57 @@ class FtaSvg:
         self.rect(x,y,w,h)
         self.texts(lines, x+w/2, y+17, 'val')
     def _op_value_box_geometry(self,x,y,w,h):
-        # The value box must have the same width as the gate rectangles.
         box_h = 58 if getattr(self,'pure',False) else 42
         box_w = _GATE_W
         box_x = x + w/2 - box_w/2
         box_y = y + h/2 - box_h/2
         return box_x, box_y, box_w, box_h
     def and_shape(self,x,y,w,h,lines):
-        # PFTA-like AND: high connector body, value rectangle centered inside.
-        # Important: no vertical line is drawn above the shape here. The main
-        # connector line is drawn before this function is called and is then
-        # hidden by this filled shape/value rectangle.
         box_x, box_y, box_w, box_h = self._op_value_box_geometry(x,y,w,h)
         cx = x + w/2
         top = y + 8
         bottom = y + h - 8
         r = min(w*0.50, (bottom-top)*0.55)
         sx = cx - r
-        d = (
-            f'M {sx:.1f} {top+r:.1f} '
-            f'A {r:.1f} {r:.1f} 0 0 1 {sx+2*r:.1f} {top+r:.1f} '
-            f'L {sx+2*r:.1f} {bottom:.1f} '
-            f'L {sx:.1f} {bottom:.1f} Z'
-        )
+        d = (f'M {sx:.1f} {top+r:.1f} ' f'A {r:.1f} {r:.1f} 0 0 1 {sx+2*r:.1f} {top+r:.1f} ' f'L {sx+2*r:.1f} {bottom:.1f} ' f'L {sx:.1f} {bottom:.1f} Z')
         self.svg.append(f'<path d="{d}" fill="{_FILL}" stroke="{_STROKE}" stroke-width="1.5"/>')
         self._value_box(box_x, box_y, box_w, box_h, lines)
     def or_shape(self,x,y,w,h,lines):
-        # PFTA-like OR: tall curved connector, value rectangle centered inside.
-        # The vertical line is intentionally not overdrawn here; the filled OR
-        # symbol and value rectangle mask the line underneath.
         box_x, box_y, box_w, box_h = self._op_value_box_geometry(x,y,w,h)
         sx = x + 8
         sw = w - 16
         top = y + 6
         bottom = y + h - 6
-        d = (
-            f'M {sx:.1f} {bottom:.1f} '
-            f'C {sx+sw*.14:.1f} {top:.1f}, {sx+sw*.86:.1f} {top:.1f}, {sx+sw:.1f} {bottom:.1f} '
-            f'C {sx+sw*.68:.1f} {y+h*.61:.1f}, {sx+sw*.32:.1f} {y+h*.61:.1f}, {sx:.1f} {bottom:.1f} Z'
-        )
+        d = (f'M {sx:.1f} {bottom:.1f} ' f'C {sx+sw*.14:.1f} {top:.1f}, {sx+sw*.86:.1f} {top:.1f}, {sx+sw:.1f} {bottom:.1f} ' f'C {sx+sw*.68:.1f} {y+h*.61:.1f}, {sx+sw*.32:.1f} {y+h*.61:.1f}, {sx:.1f} {bottom:.1f} Z')
         self.svg.append(f'<path d="{d}" fill="{_FILL}" stroke="{_STROKE}" stroke-width="1.5"/>')
         self._value_box(box_x, box_y, box_w, box_h, lines)
-    def draw_gate(self,gid,root):
-        x,y,w,h=self.pos[('gate',gid)]; self.rect(x,y,w,_TITLE_H); self.texts(_wrap(self.gates.get(gid,{}).get('label',gid),30,4),x+w/2,y+24)
+    def draw_gate(self,gid,root,path=None):
+        if path is None:
+            path = ((0, gid),)
+        x,y,w,h=self.pos[('gate',path)]; self.rect(x,y,w,_TITLE_H); self.texts(_wrap(self.gates.get(gid,{}).get('label',gid),30,4),x+w/2,y+24)
         self.rect(x,y+_TITLE_H+7,w,_ID_H); self.texts([gid],x+w/2,y+_TITLE_H+25,'small'); self.line(x+w/2,y+_TITLE_H,x+w/2,y+_TITLE_H+7)
         if gid not in self.children: return
-        ox,oy,ow,oh=self.pos[('op',gid)]
-        # OR connector is intentionally drawn 1.5 times higher than the normal
-        # operator height; additionally, the whole OR connector, including its
-        # centred value rectangle, is shifted upward by one value-rectangle
-        # height so that the OR sits visually around the vertical connection.
+        ox,oy,ow,oh=self.pos[('op',path)]
         is_or = self.gtypes.get(gid)=='OR'
         draw_h = oh*1.5 if is_or else oh
         op_y = oy - 42 if is_or else oy
         self.line(x+w/2,y+_TITLE_H+7+_ID_H,x+w/2,op_y+draw_h)
         (self.and_shape if self.gtypes.get(gid)=='AND' else self.or_shape)(ox,op_y,ow,draw_h,self.op_lines(gid))
         tops=[]
-        for ch in self.children.get(gid,[]):
+        for i,ch in enumerate(self.children.get(gid,[])):
+            child_path = self._child_path(path, i, ch)
             if ch in self.grows and not (self.gates.get(ch,{}).get('is_page') and ch!=root):
-                self.draw_gate(ch,root); cx,cy,cw,chh=self.pos[('gate',ch)]; tops.append((cx+cw/2,cy))
+                self.draw_gate(ch,root,child_path); cx,cy,cw,chh=self.pos[('gate',child_path)]; tops.append((cx+cw/2,cy))
             else:
-                self.draw_leaf(ch,root); lx,ly,lw,lh=self.pos[('leaf',ch)]; tops.append((lx+lw/2,ly))
+                self.draw_leaf(ch,root,child_path); lx,ly,lw,lh=self.pos[('leaf',child_path)]; tops.append((lx+lw/2,ly))
         if tops:
             op_bottom = op_y + draw_h
             bus=min(t[1] for t in tops)-28; self.line(ox+ow/2,op_bottom,ox+ow/2,bus); self.line(min(t[0] for t in tops),bus,max(t[0] for t in tops),bus)
             for tx,ty in tops: self.line(tx,bus,tx,ty)
-    def draw_leaf(self,nid,root):
-        x,y,w,h=self.pos[('leaf',nid)]
+    def draw_leaf(self,nid,root,path):
+        x,y,w,h=self.pos[('leaf',path)]
         if nid in self.grows:
             href=self.page_files.get(nid,'')
-            # Transfer / triangle connector. The triangle contains two centred
-            # rectangles: one ID rectangle and one value rectangle. The vertical
-            # gap between them is approximately one font height.
             tri_h = _OP_H
             pts=f'{x+w/2:.1f},{y:.1f} {x+w*.92:.1f},{y+tri_h:.1f} {x+w*.08:.1f},{y+tri_h:.1f}'
             if href: self.svg.append(f'<a href="{self.esc(href)}">')
@@ -1194,7 +1180,7 @@ class FtaSvg:
             box_w = _GATE_W
             id_h = _ID_H
             val_h = 58 if getattr(self,'pure',False) else 42
-            gap = 16  # about one normal font height
+            gap = 16
             group_h = id_h + gap + val_h
             box_x = x + w/2 - box_w/2
             id_y = y + tri_h/2 - group_h/2
@@ -1208,9 +1194,6 @@ class FtaSvg:
         self.rect(x,y,w,_TITLE_H); self.texts(_wrap(e.get('label',nid),30,4),x+w/2,y+24)
         self.rect(x,y+_TITLE_H+7,w,_ID_H); self.texts([nid],x+w/2,y+_TITLE_H+25,'small'); self.line(x+w/2,y+_TITLE_H,x+w/2,y+_TITLE_H+7)
         cx=x+w/2; cy=y+_TITLE_H+_ID_H+_EVENT_VALUE_H/2+26; r=_EVENT_VALUE_H/2
-        # Event symbol with a centred value rectangle of the same width as gates.
-        # The circle is drawn first, then the gate-width value rectangle is
-        # superimposed in the middle.
         self.svg.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="{_FILL}" stroke="{_STROKE}" stroke-width="1.5"/>')
         box_w = _GATE_W
         box_h = 58 if getattr(self,'pure',False) else 42
