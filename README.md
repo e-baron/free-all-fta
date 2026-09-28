@@ -123,6 +123,12 @@ python3 free-all-fta.py <excel-file> [options]
 - `--diag`
 	- Generates FTA diagrams (SVG + HTML index) in addition to the output workbook.
 
+- `--tree-name <worksheet>`
+	- Uses the named worksheet as the FTA tree instead of `tree`.
+	- The worksheet must contain tree columns such as `L1_ID`.
+	- When provided, automatic output names include the worksheet name, for example `workbook_MyTree_alloc.xlsx` and `workbook_MyTree_alloc_fta.html`.
+	- It allows you to work with multiple trees in the same Excel workbook.
+
 - `--alloc-out <path>`
 	- Output workbook path for Markov mode.
 	- Kept for backward compatibility.
@@ -146,17 +152,12 @@ python3 free-all-fta.py <excel-file> [options]
 
 ## Practical Examples
 
-### Markov + diagrams with default naming
+### Markov + Pure probability diagrams with default naming
 
 ```bash
 python free-all-fta.py free-all-fta-example.xlsx --diag
 ```
 
-equivalent of:
-
-```bash
-python free-all-fta.py free-all-fta-example.xlsx --diag --markov
-```
 
 ### Pure probability output + diagrams with default naming
 

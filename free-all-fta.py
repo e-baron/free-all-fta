@@ -113,6 +113,17 @@ def tree_cols(ws) -> List[Tuple[int, int, Optional[int]]]:
     return [(lvl, d[lvl]["ID"], d[lvl].get("TYPE")) for lvl in sorted(d) if "ID" in d[lvl]]
 
 
+def tree_sheet(wb, tree_name: str = "tree"):
+    if not tree_name:
+        raise ValueError("--tree-name requires a worksheet name")
+    if tree_name not in wb.sheetnames:
+        raise ValueError(f"Tree worksheet '{tree_name}' was not found")
+    ws = wb[tree_name]
+    if not tree_cols(ws):
+        raise ValueError(f"Worksheet '{tree_name}' does not contain a tree")
+    return ws
+
+
 def parse_tree(ws, event_ids: Set[str], gate_ids: Set[str]):
     """Parse a vertically indented tree: one node per row, level given by Lxx_ID."""
     children = defaultdict(OrderedDict)
@@ -209,12 +220,12 @@ def update_table(ws, tname: str):
     tab.tableColumns = cols
 
 
-def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None) -> str:
+def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: str = "tree") -> str:
     src = Path(xlsx).expanduser().resolve()
     dst = Path(out_xlsx).expanduser().resolve() if out_xlsx else src.with_name(src.stem + "_alloc" + src.suffix)
 
     wb = openpyxl.load_workbook(src, data_only=False)
-    we, wg, wt = wb["events"], wb["gates"], wb["tree"]
+    we, wg, wt = wb["events"], wb["gates"], tree_sheet(wb, tree_name)
 
     ensure_col(wg, "calculated frequency", after="safety target")
     ensure_col(wg, "calculated mean repair time", after="calculated frequency")
@@ -413,7 +424,7 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None) -> str:
 
 
 
-def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None) -> str:
+def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: str = "tree") -> str:
     """Pure allocative FTA updater.
 
     This mode does not use Markov formulas. It calculates probabilities with:
@@ -428,7 +439,7 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None) -> str:
     dst = Path(out_xlsx).expanduser().resolve() if out_xlsx else src.with_name(src.stem + "_pure" + src.suffix)
 
     wb = openpyxl.load_workbook(src, data_only=False)
-    we, wg, wt = wb["events"], wb["gates"], wb["tree"]
+    we, wg, wt = wb["events"], wb["gates"], tree_sheet(wb, tree_name)
 
     ensure_col(wg, "calculated frequency", after="safety target")
     ensure_col(wg, "calculated mean repair time", after="calculated frequency")
@@ -800,10 +811,10 @@ def _truthy(v):
     if isinstance(v, bool): return v
     return False if v is None else str(v).strip().lower() in ('true','yes','y','1','x')
 
-def _diagram_data(xlsx, pure=False):
+def _diagram_data(xlsx, pure=False, tree_name="tree"):
     wbf = openpyxl.load_workbook(xlsx, data_only=False)
     wbv = openpyxl.load_workbook(xlsx, data_only=True)
-    we, wg, wt = wbf['events'], wbf['gates'], wbf['tree']
+    we, wg, wt = wbf['events'], wbf['gates'], tree_sheet(wbf, tree_name)
     eh, erows = rows_by_id(we); gh, grows = rows_by_id(wg)
     eh, gh = headers(we), headers(wg)
     children, gtypes = parse_tree(wt, set(erows), set(grows))
@@ -1233,11 +1244,11 @@ class FtaSvg:
         self._value_box(box_x, box_y, box_w, box_h, self.event_lines(nid))
         self.line(cx,y+_TITLE_H+7+_ID_H,cx,cy-r)
 
-def build_diagrams(xlsx, diag_prefix=None, output_dir=None, pure=False):
+def build_diagrams(xlsx, diag_prefix=None, output_dir=None, pure=False, tree_name="tree"):
     src=Path(xlsx).expanduser().resolve(); out_dir=Path(output_dir).expanduser().resolve() if output_dir else Path(src.stem).resolve(); out_dir.mkdir(parents=True,exist_ok=True)
     dst=out_dir/src.name
     if src.resolve()!=dst.resolve(): _shutil.copy2(src,dst)
-    data=_diagram_data(str(src), pure=pure); children,gtypes,erows,grows,events,gates,roots=data[:7]
+    data=_diagram_data(str(src), pure=pure, tree_name=tree_name); children,gtypes,erows,grows,events,gates,roots=data[:7]
     pages=[]
     page_parents={}
 
@@ -1296,6 +1307,7 @@ def main():
 
     # Output / diagram options.
     ap.add_argument("--diag", action="store_true", help="Generate FTA diagrams in addition to the Excel workbook.")
+    ap.add_argument("--tree-name", default=None, help="Worksheet containing the FTA tree; defaults to 'tree'.")
     ap.add_argument("--alloc-out", default=None, help="Output path for the Markov workbook. Kept for backward compatibility.")
     ap.add_argument("--markov-out", default=None, help="Alias for --alloc-out.")
     ap.add_argument("--pure-out", default=None, help="Output path for the pure-probability workbook.")
@@ -1313,6 +1325,16 @@ def main():
     explicit_model = "pure" if args.pure else ("markov" if args.markov else None)
 
     input_path = Path(args.excel).expanduser().resolve()
+    tree_name = args.tree_name if args.tree_name is not None else "tree"
+    try:
+        workbook = openpyxl.load_workbook(input_path, read_only=True, data_only=False)
+        tree_sheet(workbook, tree_name)
+        workbook.close()
+    except ValueError as exc:
+        raise SystemExit(f"Error: {exc}") from exc
+    except FileNotFoundError:
+        raise SystemExit(f"Error: workbook not found: {input_path}") from None
+
     out_dir = args.diag_dir
     if out_dir is None:
         out_dir = str(input_path.with_suffix(""))
@@ -1321,16 +1343,18 @@ def main():
     def build_markov() -> str:
         markov_out = args.markov_out or args.alloc_out
         if markov_out is None:
-            markov_out = str(Path(out_dir) / (input_path.stem + "_alloc" + input_path.suffix))
-        path = build_markov_workbook(str(input_path), markov_out)
+            tree_suffix = f"_{tree_name}" if args.tree_name is not None else ""
+            markov_out = str(Path(out_dir) / (input_path.stem + tree_suffix + "_alloc" + input_path.suffix))
+        path = build_markov_workbook(str(input_path), markov_out, tree_name=tree_name)
         print("OK markov: " + path)
         return path
 
     def build_pure() -> str:
         pure_out = args.pure_out
         if pure_out is None:
-            pure_out = str(Path(out_dir) / (input_path.stem + "_pure" + input_path.suffix))
-        path = build_pure_workbook(str(input_path), pure_out)
+            tree_suffix = f"_{tree_name}" if args.tree_name is not None else ""
+            pure_out = str(Path(out_dir) / (input_path.stem + tree_suffix + "_pure" + input_path.suffix))
+        path = build_pure_workbook(str(input_path), pure_out, tree_name=tree_name)
         print("OK pure: " + path)
         return path
 
@@ -1360,7 +1384,10 @@ def main():
         for model_name, workbook_path in diag_targets:
             # Avoid filename collisions when generating both model diagram sets.
             if args.diag_prefix:
-                prefix = args.diag_prefix if len(diag_targets) == 1 else f"{args.diag_prefix}_{model_name}"
+                base_prefix = args.diag_prefix
+                if args.tree_name is not None:
+                    base_prefix = f"{base_prefix}_{tree_name}"
+                prefix = base_prefix if len(diag_targets) == 1 else f"{base_prefix}_{model_name}"
             else:
                 prefix = None
             html_out = build_diagrams(
@@ -1368,6 +1395,7 @@ def main():
                 prefix,
                 output_dir=out_dir,
                 pure=(model_name == "pure"),
+                tree_name=tree_name,
             )
             print(f"OK diag ({model_name}): {html_out}")
 
