@@ -1239,16 +1239,41 @@ def build_diagrams(xlsx, diag_prefix=None, output_dir=None, pure=False):
     if src.resolve()!=dst.resolve(): _shutil.copy2(src,dst)
     data=_diagram_data(str(src), pure=pure); children,gtypes,erows,grows,events,gates,roots=data[:7]
     pages=[]
+    page_parents={}
+
+    def collect_pages(gid, parent_page=None, is_root=False):
+        is_page = is_root or (gid in grows and gid in children and gates.get(gid,{}).get('is_page'))
+        current_page = gid if is_page else parent_page
+        if is_page:
+            if gid not in pages:
+                pages.append(gid)
+                page_parents[gid] = parent_page
+        for child in children.get(gid, []):
+            if child in grows:
+                collect_pages(child, current_page)
+
     for gid in roots:
-        if gid not in pages: pages.append(gid)
+        collect_pages(gid, is_root=True)
+    # Keep disconnected paged gates visible, while retaining workbook order
+    # for this fallback since no parent relationship can be inferred.
     for gid in grows:
-        if gates.get(gid,{}).get('is_page') and gid in children and gid not in pages: pages.append(gid)
+        if gates.get(gid,{}).get('is_page') and gid in children and gid not in pages:
+            collect_pages(gid)
     prefix=diag_prefix or src.stem; page_files={gid:f"{prefix}_fta_{'main' if i==0 else gid}.svg" for i,gid in enumerate(pages)}
     r=FtaSvg(data,page_files)
     for gid in pages: r.render(gid,out_dir/page_files[gid])
-    links=''.join(f'<li><a href="{_html.escape(page_files[g])}">{_html.escape(g)}</a></li>' for g in pages)
+    def page_links(parent=None):
+        items=[]
+        for gid in pages:
+            if page_parents.get(gid) != parent:
+                continue
+            nested=page_links(gid)
+            items.append(f'<li><a href="{_html.escape(page_files[gid])}">{_html.escape(gid)}</a>{nested}</li>')
+        return '<ul>'+''.join(items)+'</ul>' if items else ''
+
+    links=page_links()
     sections=''.join(f'<h2>{_html.escape(g)}</h2><object type="image/svg+xml" data="{_html.escape(page_files[g])}" style="width:100%;min-height:850px;border:1px solid #ddd"></object>' for g in pages)
-    html_file=out_dir/f'{prefix}_fta.html'; html_file.write_text(f"<!doctype html><html><head><meta charset='utf-8'><title>FTA diagrams</title></head><body><h1>FTA diagrams</h1><p>Workbook: <code>{_html.escape(src.name)}</code></p><ul>{links}</ul>{sections}</body></html>",encoding='utf-8')
+    html_file=out_dir/f'{prefix}_fta.html'; html_file.write_text(f"<!doctype html><html><head><meta charset='utf-8'><title>FTA diagrams</title></head><body><h1>FTA diagrams</h1><p>Workbook: <code>{_html.escape(src.name)}</code></p>{links}{sections}</body></html>",encoding='utf-8')
     return str(html_file.resolve())
 # --- End native SVG FTA renderer v7 -----------------------------------------
 
