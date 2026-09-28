@@ -603,7 +603,14 @@ _EVENT_VALUE_H = 84
 _LEVEL_GAP = 128
 _NODE_GAP = 46
 
-_BIN = {_ast.Add:_operator.add, _ast.Sub:_operator.sub, _ast.Mult:_operator.mul, _ast.Div:_operator.truediv, _ast.Pow:_operator.pow}
+_BIN = {
+    _ast.Add: _operator.add,
+    _ast.Sub: _operator.sub,
+    _ast.Mult: _operator.mul,
+    _ast.Div: _operator.truediv,
+    _ast.Pow: _operator.pow,
+    _ast.BitXor: _operator.pow,
+}
 _UN = {_ast.UAdd:lambda x:x, _ast.USub:lambda x:-x}
 
 def _num(v):
