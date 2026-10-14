@@ -403,7 +403,7 @@ Supported gate types are:
 
 ## Probability-Only Gates
 
-A gate whose children are all `Probability`/`True`/`False` events (or other probability-only gates) has no frequency. In both modes (Markov and pure), for such a gate:
+A gate whose children are all `Probability`/`True`/`False` events (or other probability-only gates) has no frequency. An AND gate may also contain `Multiplicity` events (`qEQ = MIN(1, product(qi or mi))`); an OR gate containing a `Multiplicity` event is not a probability-only gate. In both modes (Markov and pure), for such a gate:
 
 - `calculated frequency` and `calculated mean repair time` are left empty.
 - `calculated probability` holds `qEQ = MIN(1, product(qi))` for AND, or `MIN(1, sum(qi))` for OR (the Markov workbook gets this column at the end of the `gates` sheet).

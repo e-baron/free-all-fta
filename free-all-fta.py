@@ -264,18 +264,34 @@ def minimal_cut_sets(children, gtypes, we, erows, em) -> List[Tuple[str, ...]]:
 PROB_MODELS = ("Probability", "True", "False")
 
 
-def prob_only_gates(children, erows, grows, event_model) -> Set[str]:
-    """Gates whose children are all Probability/True/False events or probability-only gates (no frequency)."""
+def prob_only_gates(children, gtypes, erows, grows, event_model) -> Set[str]:
+    """Gates with no frequency: only Probability/True/False events or probability-only gates (plus Multiplicity events under AND)."""
     memo: Dict[str, bool] = {}
+
+    def ok_event(g: str, c: str) -> bool:
+        m = event_model(c)
+        return m in PROB_MODELS or (m == "Multiplicity" and gtypes.get(g) == "AND")
 
     def is_po(g: str) -> bool:
         if g not in memo:
             memo[g] = bool(children.get(g)) and all(
-                (c in erows and event_model(c) in PROB_MODELS) or (c in grows and is_po(c)) for c in children[g]
+                (c in erows and ok_event(g, c)) or (c in grows and is_po(c)) for c in children[g]
             )
         return memo[g]
 
     return {g for g in grows if is_po(g)}
+
+
+def po_formula_text(typ: str, ops, prefix: str = "") -> str:
+    ids = ", ".join(o["id"] for o in ops)
+    if typ == "AND":
+        if any(o["m"] == "Multiplicity" for o in ops):
+            core = "qEQ = MIN(1, ∏qi × ∏mi), qi = probability events/gates, mi = Multiplicity events"
+        else:
+            core = "qEQ = MIN(1, ∏qi)"
+    else:
+        core = "qEQ = MIN(1, Σqi)"
+    return f"{prefix}{typ} probability only: {core}; no λEQ; children: {ids}"
 
 
 def id_labels(*sheets) -> Dict[str, str]:
@@ -375,7 +391,7 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
     em, ea, et = eh["model_type"], eh["allocated value"], eh["mean_repair_time"]
     gf, gt, gc, gm, gd = gh["formula"], gh["safety target"], gh["calculated frequency"], gh["calculated mean repair time"], gh["differences"]
     gp = gh["calculated probability"]
-    po = prob_only_gates(children, erows, grows, lambda e: model(we.cell(erows[e], em).value))
+    po = prob_only_gates(children, gtypes, erows, grows, lambda e: model(we.cell(erows[e], em).value))
 
     def propagate_safety_targets_top_down():
         """Top-down allocation through AND-only chains.
@@ -523,10 +539,7 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
             if gid in po:
                 fs = [o["f"] for o in ops]
                 qe = prod(fs) if typ == "AND" else plus(fs)
-                wg.cell(r, gf).value = (
-                    f"{typ} probability only: qEQ = MIN(1, {'product' if typ == 'AND' else 'sum'}(qi)); no λEQ; children: "
-                    + ", ".join(o["id"] for o in ops)
-                )
+                wg.cell(r, gf).value = po_formula_text(typ, ops)
                 wg.cell(r, gp).value = f"=MIN(1,{qe})"
                 wg.cell(r, gc).value = None
                 wg.cell(r, gm).value = None
@@ -555,8 +568,8 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
                 wg.cell(r, c).fill = YELLOW_FILL
 
     def markov_cut_w(ops):
-        # No frequency for a cut set made only of Probability events.
-        if all(o["kind"] == "factor" and o["m"] in PROB_MODELS for o in ops):
+        # No frequency for a cut set without any rate event.
+        if all(o["kind"] == "factor" for o in ops):
             return ""
         return and_formula(ops)[0]
 
@@ -623,7 +636,7 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: st
     ep = eh.get("probability")
     gf, gc, gm, gp = gh["formula"], gh["calculated frequency"], gh["calculated mean repair time"], gh["calculated probability"]
     gd, gt = gh.get("differences"), gh.get("safety target")
-    po = prob_only_gates(children, erows, grows, lambda e: model(we.cell(erows[e], em).value))
+    po = prob_only_gates(children, gtypes, erows, grows, lambda e: model(we.cell(erows[e], em).value))
 
     visiting: Set[str] = set()
     done: Set[str] = set()
@@ -734,10 +747,7 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: st
                     raise ValueError(f"Child {ch} under {gid} not found in events/gates")
             qexpr, texpr, wexpr, txt = pure_formula(typ, ops)
             if gid in po:
-                txt = (
-                    f"PURE {typ} probability only: qEQ = MIN(1, {'product' if typ == 'AND' else 'sum'}(qi)); no wEQ; children: "
-                    + ", ".join(o["id"] for o in ops)
-                )
+                txt = po_formula_text(typ, ops, "PURE ")
                 texpr = wexpr = ""
             wg.cell(r, gf).value = txt
             wg.cell(r, gp).value = "=" + qexpr
@@ -1025,7 +1035,7 @@ def _diagram_data(xlsx, pure=False, tree_name="tree"):
     # from events[Allocated value] and sdt from events[mean_repair_time].
     computed = {}
 
-    po = prob_only_gates(children, erows, grows, lambda e: events[e]['model'])
+    po = prob_only_gates(children, gtypes, erows, grows, lambda e: events[e]['model'])
 
     def as_num(v):
         return _num(v)
