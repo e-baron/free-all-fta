@@ -1412,7 +1412,7 @@ def build_diagrams(xlsx, diag_prefix=None, output_dir=None, pure=False, tree_nam
         return '<ul>'+''.join(items)+'</ul>' if items else ''
 
     links=page_links()
-    sections=''.join(f'<h2>{_html.escape(g)}</h2><object type="image/svg+xml" data="{_html.escape(page_files[g])}" style="width:100%;min-height:850px;border:1px solid #ddd"></object>' for g in pages)
+    sections=''.join(f'<h2><a href="{_html.escape(page_files[g])}">{_html.escape(g)}</a></h2><object type="image/svg+xml" data="{_html.escape(page_files[g])}" style="width:100%;min-height:850px;border:1px solid #ddd"></object>' for g in pages)
     html_file=out_dir/f'{prefix}_fta.html'; html_file.write_text(f"<!doctype html><html><head><meta charset='utf-8'><title>FTA diagrams</title></head><body><h1>FTA diagrams</h1><p>Workbook: <code>{_html.escape(src.name)}</code></p>{links}{sections}</body></html>",encoding='utf-8')
     return str(html_file.resolve())
 # --- End native SVG FTA renderer v7 -----------------------------------------
