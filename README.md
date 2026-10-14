@@ -412,6 +412,8 @@ A gate whose children are all `Probability`/`True`/`False` events (or other prob
 
 When a pure-mode `Probability` event has an empty `probability` cell, its `allocated value` is used.
 
+An OR gate must not mix probability children (probability-only gates, `Probability`/`True`/`False` events) with frequency children (rate events, other gates). The script stops with `ERROR: Mixed dimensions at OR gate ...`, naming the offending gate and children.
+
 ## Cut Sets Worksheet
 
 Both generated workbooks (`*_alloc.xlsx` and `*_pure.xlsx`) contain a `cut-sets` worksheet, formatted as an Excel table named `mcs_table`, listing the minimal cut sets (MCS) of the top gate(s) of the tree, sorted by `w` from highest to lowest (cut sets without a computable `w` come last). `True` events are ignored and `False` events remove the cut sets they belong to. Values are live Excel formulas based on the `events` worksheet.

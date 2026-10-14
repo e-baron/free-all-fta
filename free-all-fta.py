@@ -282,6 +282,22 @@ def prob_only_gates(children, gtypes, erows, grows, event_model) -> Set[str]:
     return {g for g in grows if is_po(g)}
 
 
+def check_or_dimensions(gid, chs, po, erows, event_model):
+    """Raise if an OR gate mixes probability children and frequency children."""
+    prob, freq = [], []
+    for c in chs:
+        if c in po or (c in erows and event_model(c) in PROB_MODELS):
+            prob.append(c)
+        elif c not in erows or event_model(c) != "Multiplicity":
+            freq.append(c)
+    if prob and freq:
+        raise ValueError(
+            f"ERROR: Mixed dimensions at OR gate '{gid}': Probability and Frequency children cannot be directly combined. "
+            f"Probability children: {', '.join(prob)}; Frequency children: {', '.join(freq)}. "
+            f"E.g. '{prob[0]}' (probability) cannot be mixed with '{freq[0]}' (frequency) in an OR gate."
+        )
+
+
 def po_formula_text(typ: str, ops, prefix: str = "") -> str:
     ids = ", ".join(o["id"] for o in ops)
     if typ == "AND":
@@ -536,6 +552,8 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
                     ops.append(gop(ch))
                 else:
                     raise ValueError(f"Child {ch} under {gid} not found in events/gates")
+            if typ == "OR":
+                check_or_dimensions(gid, chs, po, erows, lambda e: model(we.cell(erows[e], em).value))
             if gid in po:
                 fs = [o["f"] for o in ops]
                 qe = prod(fs) if typ == "AND" else plus(fs)
@@ -745,6 +763,8 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: st
                     ops.append(gop(ch))
                 else:
                     raise ValueError(f"Child {ch} under {gid} not found in events/gates")
+            if typ == "OR":
+                check_or_dimensions(gid, chs, po, erows, lambda e: model(we.cell(erows[e], em).value))
             qexpr, texpr, wexpr, txt = pure_formula(typ, ops)
             if gid in po:
                 txt = po_formula_text(typ, ops, "PURE ")
@@ -1539,7 +1559,10 @@ def main():
         if markov_out is None:
             tree_suffix = f"_{tree_name}" if args.tree_name is not None else ""
             markov_out = str(Path(out_dir) / (input_path.stem + tree_suffix + "_alloc" + input_path.suffix))
-        path = build_markov_workbook(str(input_path), markov_out, tree_name=tree_name)
+        try:
+            path = build_markov_workbook(str(input_path), markov_out, tree_name=tree_name)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
         print("OK markov: " + path)
         return path
 
@@ -1548,7 +1571,10 @@ def main():
         if pure_out is None:
             tree_suffix = f"_{tree_name}" if args.tree_name is not None else ""
             pure_out = str(Path(out_dir) / (input_path.stem + tree_suffix + "_pure" + input_path.suffix))
-        path = build_pure_workbook(str(input_path), pure_out, tree_name=tree_name)
+        try:
+            path = build_pure_workbook(str(input_path), pure_out, tree_name=tree_name)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
         print("OK pure: " + path)
         return path
 
