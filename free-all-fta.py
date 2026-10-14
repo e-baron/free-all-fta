@@ -11,9 +11,9 @@ from collections import defaultdict, OrderedDict
 from typing import Any, Dict, List, Optional, Set, Tuple
 import openpyxl
 from openpyxl.formatting.rule import CellIsRule
-from openpyxl.styles import PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter, range_boundaries
-from openpyxl.worksheet.table import TableColumn
+from openpyxl.worksheet.table import Table, TableColumn, TableStyleInfo
 from openpyxl.worksheet.filters import AutoFilter
 
 ID_SPLIT = " - "
@@ -220,6 +220,116 @@ def update_table(ws, tname: str):
     tab.tableColumns = cols
 
 
+def minimal_cut_sets(children, gtypes, we, erows, em) -> List[Tuple[str, ...]]:
+    """Minimal cut sets (MOCUS-style) of the tree root(s); True events are neutral, False events kill a set."""
+    below = {c for chs in children.values() for c in chs}
+    roots = [g for g in children if g not in below]
+    memo: Dict[str, Optional[List[frozenset]]] = {}
+
+    def cs(node: str):
+        if node in memo:
+            return memo[node]
+        if node in erows:
+            m = model(we.cell(erows[node], em).value)
+            res = [frozenset()] if m == "True" else [] if m == "False" else [frozenset([node])]
+        elif node not in children:
+            res = [frozenset([node])]
+        else:
+            subs = [cs(c) for c in children[node]]
+            if gtypes.get(node) == "AND":
+                res = [frozenset()]
+                for s in subs:
+                    res = [a | b for a in res for b in s]
+            else:
+                res = [x for s in subs for x in s]
+            res = list(dict.fromkeys(res))
+        memo[node] = res
+        return res
+
+    allsets = list(dict.fromkeys(x for r in roots for x in cs(r)))
+    allsets.sort(key=len)
+    minimal: List[frozenset] = []
+    for s in allsets:
+        if s and not any(m <= s for m in minimal):
+            minimal.append(s)
+    order = {}
+    for lst in children.values():
+        for c in lst:
+            order.setdefault(c, len(order))
+    out = [tuple(sorted(s, key=lambda x: order.get(x, 10**9))) for s in minimal]
+    out.sort(key=lambda t: (len(t), [order.get(x, 10**9) for x in t]))
+    return out
+
+
+def id_labels(*sheets) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for ws in sheets:
+        hs = headers(ws)
+        if "id" in hs and "label" in hs:
+            for r in range(2, ws.max_row + 1):
+                i, lab = clean_id(ws.cell(r, hs["id"]).value), ws.cell(r, hs["label"]).value
+                if i and lab:
+                    out[i] = str(lab).replace("\n", " ").strip()
+    return out
+
+
+def write_cut_sets_sheet(wb, mcs, formulas, with_q: bool, labels: Optional[Dict[str, str]] = None, src=None):
+    """formulas(ids) -> (w_formula, q_formula); empty string means no value. Rows are sorted by w descending; uncomputable w last."""
+    labels = labels or {}
+    if "cut-sets" in wb.sheetnames:
+        del wb["cut-sets"]
+    ws = wb.create_sheet("cut-sets")
+    ws.append(["order", "MCS", "w (frequency /h)"] + (["q (probability)"] if with_q else []))
+
+    # Only the events sheet keeps its cached values; other sheets were modified in memory.
+    real = openpyxl.load_workbook(src, data_only=True) if src else None
+
+    class _Empty:
+        def cell(self, r, c):
+            return type("C", (), {"value": None})()
+
+    class _Cache:
+        def __getitem__(self, name):
+            return real[name] if real is not None and name == "events" else _Empty()
+
+    memo: dict = {}
+
+    def w_value(f):
+        if not f:
+            return math.inf
+        def sub(m):
+            r2, c2 = _coord_to_tuple((m.group(2) + m.group(3)).replace("$", ""))
+            return str(_num(_eval_cell(wb, _Cache(), m.group(1), r2, c2, memo)) or 0)
+        try:
+            return _safe_eval(re.sub(r"'([^']+)'!\$?([A-Z]+)\$?(\d+)", sub, f[1:]))
+        except Exception:
+            return math.inf
+
+    rows = []
+    for ids in mcs:
+        w, q = formulas(ids)
+        rows.append((w_value(w), ids, w, q))
+    rows.sort(key=lambda x: (x[0] == math.inf, -x[0] if x[0] != math.inf else 0))
+
+    for _v, ids, w, q in rows:
+        text = "\n".join(f"{i} - {labels[i]}" if labels.get(i) else i for i in ids)
+        ws.append([len(ids), text, w or None] + ([q or None] if with_q else []))
+        r = ws.max_row
+        for c in range(1, ws.max_column + 1):
+            ws.cell(r, c).alignment = Alignment(wrap_text=(c == 2), vertical="top")
+        for c in range(3, ws.max_column + 1):
+            ws.cell(r, c).number_format = "0.000E+00"
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 70
+    ws.column_dimensions["C"].width = 20
+    ws.column_dimensions["D"].width = 20
+    ws.freeze_panes = "A2"
+    if ws.max_row >= 2:
+        tab = Table(displayName="mcs_table", ref=f"A1:{get_column_letter(ws.max_column)}{ws.max_row}")
+        tab.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
+        ws.add_table(tab)
+
+
 def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: str = "tree") -> str:
     src = Path(xlsx).expanduser().resolve()
     dst = Path(out_xlsx).expanduser().resolve() if out_xlsx else src.with_name(src.stem + "_alloc" + src.suffix)
@@ -409,6 +519,15 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
             for c in (gf, gc, gm):
                 wg.cell(r, c).fill = YELLOW_FILL
 
+    write_cut_sets_sheet(
+        wb,
+        minimal_cut_sets(children, gtypes, we, erows, em),
+        lambda ids: (and_formula([evop(i) if i in erows else gop(i) for i in ids])[0], ""),
+        with_q=False,
+        labels=id_labels(we, wg),
+        src=src,
+    )
+
     update_table(we, "tbl_events")
     update_table(wg, "tbl_gates")
     try:
@@ -589,6 +708,15 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: st
         dr = f"{get_column_letter(gd)}2:{get_column_letter(gd)}{wg.max_row}"
         wg.conditional_formatting.add(dr, CellIsRule(operator="greaterThanOrEqual", formula=["0"], fill=GREEN_FILL))
         wg.conditional_formatting.add(dr, CellIsRule(operator="lessThan", formula=["0"], fill=RED_FILL))
+
+    def cut_set_formulas(ids):
+        ops = [evop(i) if i in erows else gop(i) for i in ids]
+        qexpr, _t, wexpr, _txt = pure_formula("AND", ops)
+        if len(ops) == 1 and ops[0]["w"]:
+            wexpr = ops[0]["w"]
+        return ("=" + wexpr if wexpr else ""), "=" + qexpr
+
+    write_cut_sets_sheet(wb, minimal_cut_sets(children, gtypes, we, erows, em), cut_set_formulas, with_q=True, labels=id_labels(we, wg), src=src)
 
     for ws, tn in ((we, "tbl_events"), (wg, "tbl_gates")):
         update_table(ws, tn)

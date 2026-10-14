@@ -401,6 +401,19 @@ Supported gate types are:
 - `AND`
 - `OR`
 
+## Cut Sets Worksheet
+
+Both generated workbooks (`*_alloc.xlsx` and `*_pure.xlsx`) contain a `cut-sets` worksheet, formatted as an Excel table named `mcs_table`, listing the minimal cut sets (MCS) of the top gate(s) of the tree, sorted by `w` from highest to lowest (cut sets without a computable `w` come last). `True` events are ignored and `False` events remove the cut sets they belong to. Values are live Excel formulas based on the `events` worksheet.
+
+Columns:
+
+- `order`: number of events in the cut set.
+- `MCS`: the cut set events, one per line, as `id - label` (label omitted if empty).
+- `w (frequency /h)`: frequency of the cut set, computed with the same AND formulas as the mode (Markov or pure).
+- `q (probability)` (pure mode only): `MIN(1, product(qi))` of the cut set.
+
+In pure mode, the `w` of an order-1 cut set is the event rate itself.
+
 ## Supported Event Model Types
 
 Recognized `model_type` values include:
@@ -416,7 +429,7 @@ Recognized `model_type` values include:
 
 Depending on options, outputs include:
 
-- Updated workbook (`*_alloc.xlsx` or `*_pure.xlsx`, unless custom path is provided)
+- Updated workbook (`*_alloc.xlsx` or `*_pure.xlsx`, unless custom path is provided), including the `cut-sets` worksheet
 - Diagram files (`*_fta_*.svg`)
 - Diagram index page (`*_fta.html`)
 
