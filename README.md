@@ -401,6 +401,17 @@ Supported gate types are:
 - `AND`
 - `OR`
 
+## Probability-Only Gates
+
+A gate whose children are all `Probability`/`True`/`False` events (or other probability-only gates) has no frequency. In both modes (Markov and pure), for such a gate:
+
+- `calculated frequency` and `calculated mean repair time` are left empty.
+- `calculated probability` holds `qEQ = MIN(1, product(qi))` for AND, or `MIN(1, sum(qi))` for OR (the Markov workbook gets this column at the end of the `gates` sheet).
+- `differences` compares the `safety target` with `calculated probability`.
+- Diagrams only show `q = ...` for the gate, and omit `w`/`sdt`/`t`.
+
+When a pure-mode `Probability` event has an empty `probability` cell, its `allocated value` is used.
+
 ## Cut Sets Worksheet
 
 Both generated workbooks (`*_alloc.xlsx` and `*_pure.xlsx`) contain a `cut-sets` worksheet, formatted as an Excel table named `mcs_table`, listing the minimal cut sets (MCS) of the top gate(s) of the tree, sorted by `w` from highest to lowest (cut sets without a computable `w` come last). `True` events are ignored and `False` events remove the cut sets they belong to. Values are live Excel formulas based on the `events` worksheet.
