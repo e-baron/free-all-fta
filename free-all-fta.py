@@ -677,7 +677,8 @@ def _safe_eval(expr):
             if name == 'SQRT' and len(args) == 1: return math.sqrt(args[0])
             if name == 'ROUND' and len(args) == 2: return round(args[0], int(args[1]))
         raise ValueError(type(n).__name__)
-    return ev(_ast.parse(expr, mode='eval'))
+    # Excel '^' binds tighter than '*' (Python's '^' is XOR), so map it to '**'.
+    return ev(_ast.parse(expr.replace('^', '**'), mode='eval'))
 
 def _defined_name_value(wbf, wbv, name, memo=None):
     """Return the scalar value of an Excel defined name, if it resolves to a cell/range.
