@@ -671,13 +671,18 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: st
 
     visiting: Set[str] = set()
     done: Set[str] = set()
+    gate_has_t: Set[str] = set()
+    gate_has_q: Set[str] = set()
 
     def evop(eid: str):
         r = erows[eid]
         m = model(we.cell(r, em).value)
         lam = ref("events", r, ea)
         T = ref("events", r, et)
-        if m in ("ConstantRate", "Fixed"):
+        if m == "Fixed":
+            # Fixed frequency: no T, no q of its own, w = lambda.
+            return {"id": eid, "q": "", "raw_q": "", "w": lam, "T": "", "m": m, "fixed": True}
+        if m == "ConstantRate":
             # Pure probability of at least one occurrence during T.
             q = f"(1-EXP(-({lam}*{T})))"
             return {"id": eid, "q": q, "raw_q": q, "w": lam, "T": T, "m": m}
@@ -702,6 +707,8 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: st
             q_ref = ref("gates", r, gp)
             return {"id": gid, "q": q_ref, "raw_q": q_ref, "w": "", "T": "", "m": "Gate"}
         w_ref = ref("gates", r, gc)
+        if gid not in gate_has_t:
+            return {"id": gid, "q": ref("gates", r, gp) if gid in gate_has_q else "", "raw_q": "", "w": w_ref, "T": "", "m": "Gate", "fixed": True}
         t_ref = ref("gates", r, gm)
         # For parent w calculations, do not reuse the capped q of a child gate.
         # Reconstruct the child raw probability as w_child * T_child.
@@ -723,35 +730,37 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: st
         return "MAX(" + ",".join(ps) + ")"
 
     def pure_formula(typ: str, ops):
+        # Fixed-frequency operands (no T) only contribute their w; q is used wherever a child has one.
+        fixed = [o for o in ops if o.get("fixed")]
         qparts = [o["q"] for o in ops if o.get("q") not in (None, "")]
         raw_qparts = [o["raw_q"] for o in ops if o.get("raw_q") not in (None, "")]
         wparts = [o["w"] for o in ops if o.get("w") not in (None, "")]
         tparts = [o["T"] for o in ops if o.get("T") not in (None, "")]
         texpr = max_expr(tparts)
+        has_q = bool(qparts)
 
         if typ == "AND":
-            q_raw_for_q = prod(qparts)
-            raw_for_w = prod(raw_qparts)
-            qexpr = f"MIN(1,{q_raw_for_q})"
-            wexpr = f"({raw_for_w}/{texpr})" if texpr else ""
+            raw_for_w = prod(raw_qparts + [o["w"] for o in fixed])
+            qexpr = f"MIN(1,{prod(qparts)})" if has_q else ""
+            wexpr = f"({raw_for_w}/{texpr})" if texpr else (raw_for_w if fixed else "")
             text = (
-                "PURE AND: rate-event qi = 1-EXP(-(lambda_i*T_i)); "
-                "qEQ = MIN(1, product(qi)); "
-                "wEQ = raw_product(qi) / T before MIN saturation; "
-                "for a child gate raw_q_child = w_child*T_child; T = MAX(Ti); children: "
+                "PURE AND: ConstantRate qi = 1-EXP(-(lambda_i*T_i)); Fixed events: no T, wi = lambda, q not used; "
+                "qEQ = MIN(1, product(qi)) over children having a q; "
+                "wEQ = raw_product(qi) / T × product(wFixed) before MIN saturation; "
+                "for a child gate raw_q_child = w_child*T_child; T = MAX(Ti) over children with T "
+                "(no T if there is no ConstantRate; no q if no child has a q); children: "
             )
         else:
-            q_raw_for_q = plus(qparts)
             raw_for_w = plus(raw_qparts)
-            qexpr = f"MIN(1,{q_raw_for_q})"
+            qexpr = f"MIN(1,{plus(qparts)})" if has_q else ""
             # For OR, frequency/intensity is additive. This is the key
             # correction compared with raw_q/T when one branch is already capped.
             wexpr = plus(wparts) if wparts else (f"({raw_for_w}/{texpr})" if texpr else "")
             text = (
-                "PURE OR: rate-event qi = 1-EXP(-(lambda_i*T_i)); "
+                "PURE OR: ConstantRate qi = 1-EXP(-(lambda_i*T_i)); Fixed branches are excluded from q; "
                 "qEQ = MIN(1, sum(qi)); "
                 "wEQ = sum(wi) for rate/gate branches, not capped_q/T; "
-                "T = MAX(Ti); children: "
+                "T = MAX(Ti) over children with T (no T if there is no ConstantRate; no q if no child has a q); children: "
             )
         text += ", ".join(o["id"] for o in ops)
         return qexpr, texpr, wexpr, text
@@ -783,8 +792,12 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: st
                 txt = po_formula_text(typ, ops, "PURE ")
                 texpr = wexpr = ""
             wg.cell(r, gf).value = txt
-            wg.cell(r, gp).value = "=" + qexpr
+            wg.cell(r, gp).value = "=" + qexpr if qexpr else None
+            if qexpr:
+                gate_has_q.add(gid)
             wg.cell(r, gm).value = "=" + texpr if texpr else None
+            if texpr:
+                gate_has_t.add(gid)
             # In --pure, q is capped with MIN(1,...), but w must be derived
             # from the raw/uncapped probability expression. Otherwise a branch
             # with multiplicity can saturate q to 1 and incorrectly give w=1/T.
@@ -809,7 +822,7 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: st
         qexpr, _t, wexpr, _txt = pure_formula("AND", ops)
         if len(ops) == 1 and ops[0]["w"]:
             wexpr = ops[0]["w"]
-        return ("=" + wexpr if wexpr else ""), "=" + qexpr
+        return ("=" + wexpr if wexpr else ""), ("=" + qexpr if qexpr else "")
 
     write_cut_sets_sheet(wb, minimal_cut_sets(children, gtypes, we, erows, em), cut_set_formulas, with_q=True, labels=id_labels(we, wg), src=src)
 
@@ -1173,6 +1186,8 @@ def _diagram_data(xlsx, pure=False, tree_name="tree"):
             mt = e.get('model')
             w = as_num(e.get('alloc'))
             t = as_num(e.get('mrt'))
+            if mt == 'Fixed':
+                return None, w, None, None
             if mt == 'Probability':
                 q = as_num(e.get('prob'))
                 if q is None:
@@ -1191,7 +1206,7 @@ def _diagram_data(xlsx, pure=False, tree_name="tree"):
         def gate_pure(gid):
             if gid in pure_done:
                 return pure_done[gid]
-            qs, raw_qs, ws, ts = [], [], [], []
+            qs, raw_qs, ws, ts, wfix = [], [], [], [], []
             for ch in children.get(gid, []):
                 if ch in erows:
                     q, w, t, raw_q = event_pure(ch)
@@ -1205,31 +1220,40 @@ def _diagram_data(xlsx, pure=False, tree_name="tree"):
                     raw_qs.append(raw_q)
                 if w is not None:
                     ws.append(w)
+                    if t in (None, 0):
+                        wfix.append(w)
                 if t not in (None, 0):
                     ts.append(t)
             typ = gtypes.get(gid)
             raw_qv = None
+            tv = max(ts) if ts else None
+            has_q = bool(qs)
             if typ == 'AND':
                 qprod = 1.0
                 for q in qs:
                     qprod *= q
-                qv = min(1.0, qprod)
+                qv = min(1.0, qprod) if has_q else None
                 raw_qv = 1.0
                 for rq in raw_qs:
                     raw_qv *= rq
+                for f in wfix:
+                    raw_qv *= f
             elif typ == 'OR':
                 qsum = sum(qs) if qs else None
-                qv = min(1.0, qsum) if qsum is not None else None
+                qv = min(1.0, qsum) if (qsum is not None and has_q) else None
                 raw_qv = sum(raw_qs) if raw_qs else None
             else:
                 qv = None
-            tv = max(ts) if ts else None
             if typ == 'OR' and ws:
                 wv = sum(ws)
+            elif raw_qv is not None and tv not in (None, 0):
+                wv = raw_qv / tv
+            elif typ == 'AND' and wfix:
+                wv = raw_qv
             else:
-                wv = (raw_qv / tv) if (raw_qv is not None and tv not in (None, 0)) else None
+                wv = None
             # raw_q for a gate as seen by its parent: w*T, not capped q.
-            gate_raw_q = (wv * tv) if (wv is not None and tv not in (None, 0)) else qv
+            gate_raw_q = (wv * tv) if (wv is not None and tv not in (None, 0)) else (None if wv is not None else qv)
 
             existing_q = as_num(gates[gid].get('q'))
             existing_w = as_num(gates[gid].get('w'))
@@ -1248,7 +1272,7 @@ def _diagram_data(xlsx, pure=False, tree_name="tree"):
 
             sel_w = as_num(gates[gid].get('w'))
             sel_t = as_num(gates[gid].get('sdt'))
-            selected_raw_q = (sel_w * sel_t) if (sel_w is not None and sel_t not in (None, 0)) else gate_raw_q
+            selected_raw_q = (sel_w * sel_t) if (sel_w is not None and sel_t not in (None, 0)) else (None if sel_w is not None else gate_raw_q)
             pure_done[gid] = (
                 as_num(gates[gid].get('q')),
                 sel_w,
@@ -1362,7 +1386,10 @@ class FtaSvg:
     def event_lines(self,eid):
         e=self.events.get(eid,{}); mt=e.get('model','Unknown')
         if getattr(self,'pure',False):
-            if mt in ('ConstantRate','Fixed'):
+            if mt == 'Fixed':
+                w=_fmt(e.get('alloc'),'/h')
+                return ['w = '+w] if w else [mt]
+            if mt == 'ConstantRate':
                 w0=_num(e.get('alloc')); t0=_num(e.get('mrt'))
                 q=_fmt((1.0 - math.exp(-(w0*t0))) if w0 is not None and t0 is not None else None)
                 w=_fmt(e.get('alloc'),'/h')

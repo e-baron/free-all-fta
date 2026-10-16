@@ -299,10 +299,15 @@ Which inputs each calculated gate column depends on:
 
 Event-level interpretation:
 
-- `ConstantRate` / `Fixed`:
+- `ConstantRate`:
 	- `lambda = allocated value`
 	- `T = mean_repair_time`
 	- event probability contribution `q_i = 1 - EXP(-(lambda * T))`
+	- event frequency contribution `w_i = lambda`
+- `Fixed`:
+	- `lambda = allocated value`
+	- there is no `T` (`mean_repair_time` is ignored)
+	- event probability contribution `q_i = 1` (neutral in `AND` products; excluded from `OR` sums)
 	- event frequency contribution `w_i = lambda`
 - `Probability`:
 	- `q_i = probability` when the `probability` column exists, otherwise `q_i = allocated value`.
@@ -311,21 +316,23 @@ Event-level interpretation:
 - `True` / `False`:
 	- `q_i = 1` / `0`.
 
-Gate formulas:
+Gate formulas (`Fixed` events and gates without `calculated mean repair time` are noted *fixed*; the other children, i.e. `ConstantRate` events, `Probability`/`Multiplicity` factors and gates with a `T`, are noted *q-children*):
 
 - `AND` gate:
-	- `calculated probability = MIN(1, product(q_i))`
-	- `calculated mean repair time = MAX(T_i)`.
-	The probability of the hazardous condition is directly computed from the child probabilities. There is no physical rate-weighting mechanism as in Markov theory. A weighted average duration has no probabilistic meaning. The longest child duration is the most representative persistence horizon. Using: `TEQ = MAX(Ti)` is conservative and avoids artificially increasing: `wEQ`
-	- `calculated frequency = raw_product(q_i) / MAX(T_i)`
+	- `calculated probability = MIN(1, product(q_i of q-children))`
+	- `calculated mean repair time = MAX(T_i)` over the children that have a `T`.
+	 The probability of the hazardous condition is directly computed from the child probabilities. There is no physical rate-weighting mechanism as in Markov theory. A weighted average duration has no probabilistic meaning. The longest child duration is the most representative persistence horizon. Using: `TEQ = MAX(Ti)` is conservative and avoids artificially increasing: `wEQ`
+	- `calculated frequency = raw_product(q_i of q-children) / MAX(T_i) * product(w_fixed)`
 		- Uses raw (uncapped) probability expression for frequency.
+	- If no child has a `T` (no `ConstantRate` below the gate) but there are fixed children, the gate is a Fixed frequency: `calculated frequency = raw_product(factors) * product(w_fixed)`, and `calculated mean repair time` and `calculated probability` are empty (no `t = 0`).
 
 - `OR` gate:
-	- `calculated probability = MIN(1, sum(q_i))`
-	- `calculated mean repair time = MAX(T_i)`.
-	The conjunction probability is obtained directly from the child probabilities.No Markov overlap-duration computation is involved. There is no unique mathematically derived equivalent duration.Using: `MAX(Ti)` provides a conservative exposure duration and keeps the interpretation identical to OR gates. It also avoids mixing probabilistic calculations with Markov-derived duration formulas.
+	- `calculated probability = MIN(1, sum(q_i of q-children))` (fixed children excluded)
+	- `calculated mean repair time = MAX(T_i)` over the children that have a `T`.
+	 The conjunction probability is obtained directly from the child probabilities.No Markov overlap-duration computation is involved. There is no unique mathematically derived equivalent duration.Using: `MAX(Ti)` provides a conservative exposure duration and keeps the interpretation identical to OR gates. It also avoids mixing probabilistic calculations with Markov-derived duration formulas.
 	- `calculated frequency = sum(w_i)` for rate/gate branches
 		- This avoids deriving frequency from a capped probability.
+	- If no child has a `T`, `calculated mean repair time` and `calculated probability` are empty.
 
 Difference in pure mode:
 
@@ -435,7 +442,7 @@ In pure mode, the `w` of an order-1 cut set is the event rate itself.
 Recognized `model_type` values include:
 
 - `ConstantRate` (or `constant_rate`): to be used when we now that the system is repairable
-- `Fixed`: to be used when we are not sure whether the system is repairable or we want to ignore the time to repair. In Markov mode it is a fixed frequency: it never produces an `sdt`, and a gate built only from `Fixed`/`Probability`/`Multiplicity` children is a Fixed frequency with no `calculated mean repair time`
+- `Fixed`: to be used when we are not sure whether the system is repairable or we want to ignore the time to repair. It never produces a repair time (`sdt` / `t`) in either mode: it is a fixed frequency, and in pure mode its probability contribution is `q = 1`. A gate built only from `Fixed`/`Probability`/`Multiplicity` children is a Fixed frequency with no `calculated mean repair time`
 - `Probability`: to be used when an event is not directly linked to time (e.g. for human errors...)
 - `Multiplicity`: to be used when we want to represent a number of pieces of equipment
 - `True`: this is equivalent to a probability = 1
