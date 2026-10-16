@@ -244,9 +244,11 @@ This section explains, for each mode, which inputs are used to build formulas an
 
 Event-level interpretation:
 
-- `ConstantRate` / `Fixed`:
+- `ConstantRate`:
 	- `allocated value` is interpreted as rate `lambda`.
-	- `mean_repair_time` is interpreted as `T`.
+	- `mean_repair_time` is interpreted as `T` (the only source of a repair time / `sdt`).
+- `Fixed`:
+	- `allocated value` is interpreted as a fixed frequency `lambda`, with no repair time: `mean_repair_time` is ignored.
 - `Probability` / `Multiplicity`:
 	- `allocated value` is used as a multiplicative factor.
 - `True` / `False`:
@@ -255,21 +257,22 @@ Event-level interpretation:
 Gate formulas:
 
 - `AND` gate:
-	- With multiple rate children:
-		- `calculated frequency = product(lambda_i * T_i) * sum(1 / T_i) * product(factors)`
+	Rate children with a repair time (`ConstantRate` events, or gates with a `calculated mean repair time`) are noted `lambda_i, T_i`. Rate children without one (`Fixed` events, or gates with no `sdt`) are noted `lambda_F`.
+	- With multiple children with a repair time:
+		- `calculated frequency = product(lambda_i * T_i) * sum(1 / T_i) * product(lambda_F) * product(factors)`
 		- `calculated mean repair time = 1 / sum(1 / T_i)`
 		The hazardous state exists only when all child states are simultaneously present. The overlap duration is governed by the shortest restoration process. The harmonic combination: `TEQ = 1 / Σ(1/Ti)` preserves the expected overlap duration.
-	- With one rate child:
-		- `calculated frequency = lambda_1 * product(factors)`
+	- With one child with a repair time:
+		- `calculated frequency = lambda_1 * product(lambda_F) * product(factors)`
 		- `calculated mean repair time = T_1`
-	- With only factor children:
-		- `calculated frequency = product(factors)`
-		- `calculated mean repair time` is empty.
+	- With no child with a repair time (only `Fixed` events/gates without `sdt`, and factors):
+		- `calculated frequency = product(lambda_F) * product(factors)`
+		- `calculated mean repair time` is empty (no `sdt`, no `mdt = 0`).
 
 - `OR` gate:
-	- `calculated frequency = sum(rate children lambdas) + sum(factor children)`
-	- `calculated mean repair time = sum(lambda_i * T_i) / sum(lambda_i)`
-		- Computed from rate children only. Any child failure can independently create the hazardous state. The gate occurrence rate is therefore the sum of child occurrence rates. The equivalent duration must preserve: `QEQ = λEQ · TEQ`. Therefore the duration is the rate-weighted average persistence time.
+	- `calculated frequency = sum(rate children lambdas, with or without repair time) + sum(factor children)`
+	- `calculated mean repair time = sum(lambda_i * T_i) / sum(lambda_i)`, empty if no child has a repair time.
+		- Computed from the children with a repair time only. Any child failure can independently create the hazardous state. The gate occurrence rate is therefore the sum of child occurrence rates. The equivalent duration must preserve: `QEQ = λEQ · TEQ`. Therefore the duration is the rate-weighted average persistence time.
 
 Safety-target propagation and difference:
 
@@ -432,7 +435,7 @@ In pure mode, the `w` of an order-1 cut set is the event rate itself.
 Recognized `model_type` values include:
 
 - `ConstantRate` (or `constant_rate`): to be used when we now that the system is repairable
-- `Fixed`: to be used when we are not sure whether the system is repairable or we want to ignore the time to repair
+- `Fixed`: to be used when we are not sure whether the system is repairable or we want to ignore the time to repair. In Markov mode it is a fixed frequency: it never produces an `sdt`, and a gate built only from `Fixed`/`Probability`/`Multiplicity` children is a Fixed frequency with no `calculated mean repair time`
 - `Probability`: to be used when an event is not directly linked to time (e.g. for human errors...)
 - `Multiplicity`: to be used when we want to represent a number of pieces of equipment
 - `True`: this is equivalent to a probability = 1

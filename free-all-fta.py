@@ -472,14 +472,17 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
 
     visiting: Set[str] = set()
     done: Set[str] = set()
+    gate_has_t: Set[str] = set()
 
     def evop(eid: str):
         r = erows[eid]
         m = model(we.cell(r, em).value)
         val = ref("events", r, ea)
         T = ref("events", r, et)
-        if m in ("ConstantRate", "Fixed"):
+        if m == "ConstantRate":
             return {"id": eid, "kind": "rate", "l": val, "T": T, "m": m}
+        if m == "Fixed":
+            return {"id": eid, "kind": "rate", "l": val, "T": "", "m": m}
         if m == "Probability":
             return {"id": eid, "kind": "factor", "f": val, "m": m}
         if m == "Multiplicity":
@@ -495,41 +498,49 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
         r = grows[gid]
         if gid in po:
             return {"id": gid, "kind": "factor", "f": ref("gates", r, gp), "m": "Gate"}
-        return {"id": gid, "kind": "rate", "l": ref("gates", r, gc), "T": ref("gates", r, gm), "m": "Gate"}
+        has_t = gid in gate_has_t
+        return {"id": gid, "kind": "rate", "l": ref("gates", r, gc), "T": ref("gates", r, gm) if has_t else "", "m": "Gate"}
 
     def and_formula(ops):
         rates = [o for o in ops if o["kind"] == "rate"]
         factors = [o for o in ops if o["kind"] == "factor"]
+        trates = [o for o in rates if o["T"]]
+        frates = [o for o in rates if not o["T"]]
         fexpr = prod([o["f"] for o in factors])
-        if not rates:
-            lexpr, texpr = fexpr, ""
-        elif len(rates) == 1:
-            lexpr, texpr = prod([fexpr, rates[0]["l"]]), rates[0]["T"]
+        texpr = ""
+        if not trates:
+            tpart = "1"
+        elif len(trates) == 1:
+            tpart = trates[0]["l"]
+            texpr = trates[0]["T"]
         else:
-            lt = [f"({o['l']}*{o['T']})" for o in rates]
-            inv = [f"(1/{o['T']})" for o in rates]
-            lexpr = prod([fexpr, prod(lt), plus(inv)])
+            inv = [f"(1/{o['T']})" for o in trates]
+            tpart = prod([prod([f"({o['l']}*{o['T']})" for o in trates]), plus(inv)])
             texpr = f"(1/{plus(inv)})"
-        text = "AND Markov: λEQ = "
-        if factors:
-            text += " × ".join(o["id"] for o in factors) + " × "
-        text += ("∏(λi×Ti) × Σ(1/Ti), rate children: " + ", ".join(o["id"] for o in rates)) if len(rates) > 1 else (" × ".join(o["id"] for o in rates) if rates else "factor-only product")
-        if rates:
-            text += "; TEQ = 1 / Σ(1/Ti)"
+        lexpr = prod([fexpr, tpart] + [o["l"] for o in frates])
+        if not rates:
+            text = "AND Markov: λEQ = factor-only product"
+        elif not trates:
+            text = "AND Markov: λEQ = " + " × ".join([o["id"] for o in factors] + [o["id"] for o in frates])
+        else:
+            text = "AND Markov: λEQ = " + "".join(o["id"] + " × " for o in factors)
+            text += ("∏(λi×Ti) × Σ(1/Ti), rate children with sdt: " + ", ".join(o["id"] for o in trates)) if len(trates) > 1 else trates[0]["id"]
+            if frates:
+                text += " × λFixedFrequency: " + ", ".join(o["id"] for o in frates)
+            text += "; TEQ = 1 / Σ(1/Ti) (children with sdt only)"
         return "=" + lexpr, ("=" + texpr if texpr else ""), text
 
     def or_formula(ops):
         rates = [o for o in ops if o["kind"] == "rate"]
         factors = [o for o in ops if o["kind"] == "factor"]
+        trates = [o for o in rates if o["T"]]
         lexpr = plus([o["l"] for o in rates] + [o["f"] for o in factors])
         texpr = ""
-        if rates:
-            texpr = f"({plus([f'({o["l"]}*{o["T"]})' for o in rates])}/{plus([o['l'] for o in rates])})"
+        if trates:
+            texpr = f"({plus([f'({o["l"]}*{o["T"]})' for o in trates])}/{plus([o['l'] for o in trates])})"
         text = "OR: λEQ = Σλi over children: " + ", ".join(o["id"] for o in ops)
-        if rates:
-            text += "; TEQ = Σ(λi×Ti) / Σλi"
-        if factors:
-            text += "; warning: factor-only OR children have no TEQ contribution"
+        if trates:
+            text += "; TEQ = Σ(λi×Ti) / Σλi (children with sdt only)"
         return "=" + lexpr, ("=" + texpr if texpr else ""), text
 
     def compute(gid: str):
@@ -566,7 +577,9 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
                 lf, tf, txt = and_formula(ops) if typ == "AND" else or_formula(ops)
                 wg.cell(r, gf).value = txt
                 wg.cell(r, gc).value = lf
-                wg.cell(r, gm).value = tf
+                wg.cell(r, gm).value = tf or None
+                if tf:
+                    gate_has_t.add(gid)
                 res = gc
             wg.cell(r, gd).value = f'=IF({ref("gates", r, gt, False)}="","",{ref("gates", r, gt, False)}-{ref("gates", r, res, False)})'
         visiting.remove(gid)
@@ -1063,8 +1076,10 @@ def _diagram_data(xlsx, pure=False, tree_name="tree"):
     def event_operand(eid):
         e = events[eid]
         mt = e.get('model')
-        if mt in ('ConstantRate', 'Fixed'):
+        if mt == 'ConstantRate':
             return {'kind': 'rate', 'w': as_num(e.get('alloc')), 'sdt': as_num(e.get('mrt'))}
+        if mt == 'Fixed':
+            return {'kind': 'rate', 'w': as_num(e.get('alloc')), 'sdt': None}
         if mt == 'Probability':
             return {'kind': 'factor', 'factor': as_num(e.get('alloc'))}
         if mt == 'Multiplicity':
@@ -1103,10 +1118,14 @@ def _diagram_data(xlsx, pure=False, tree_name="tree"):
         sdt_val = None
         if typ == 'AND':
             usable_rates = [o for o in rates if o.get('sdt') not in (None, 0)]
+            fixed_rates = [o for o in rates if o.get('sdt') in (None, 0)]
+            fixed_prod = 1.0
+            for o in fixed_rates:
+                fixed_prod *= o['w']
             if not usable_rates:
-                w_val = factor if factors else None
+                w_val = factor * fixed_prod if (factors or fixed_rates) else None
             elif len(usable_rates) == 1:
-                w_val = factor * usable_rates[0]['w']
+                w_val = factor * fixed_prod * usable_rates[0]['w']
                 sdt_val = usable_rates[0]['sdt']
             else:
                 prod_lt = 1.0
@@ -1114,14 +1133,14 @@ def _diagram_data(xlsx, pure=False, tree_name="tree"):
                 for o in usable_rates:
                     prod_lt *= o['w'] * o['sdt']
                     sum_inv_t += 1.0 / o['sdt']
-                w_val = factor * prod_lt * sum_inv_t
+                w_val = factor * fixed_prod * prod_lt * sum_inv_t
                 sdt_val = 1.0 / sum_inv_t if sum_inv_t else None
         elif typ == 'OR':
-            total_w = sum(o['w'] for o in rates if o.get('w') is not None)
-            w_val = total_w
-            if total_w:
-                num = sum(o['w'] * o['sdt'] for o in rates if o.get('w') is not None and o.get('sdt') is not None)
-                sdt_val = num / total_w if num else None
+            w_val = sum(o['w'] for o in rates)
+            trs = [o for o in rates if o.get('sdt') not in (None, 0)]
+            den = sum(o['w'] for o in trs)
+            if den:
+                sdt_val = sum(o['w'] * o['sdt'] for o in trs) / den
 
         # Prefer workbook numeric values when they exist. If a cell contains a
         # formula string or no cached value, _num returns None and fallback is used.
@@ -1365,7 +1384,7 @@ class FtaSvg:
             return ['q = '+q] if q else [mt]
         if mt in ('ConstantRate','Fixed'):
             out=[]
-            w=_fmt(e.get('alloc'),'/h'); s=_fmt(e.get('mrt'),'h')
+            w=_fmt(e.get('alloc'),'/h'); s=_fmt(e.get('mrt'),'h') if mt=='ConstantRate' else ''
             if w: out.append('w = '+w)
             if s: out.append('sdt = '+s)
             return out or ['w = ?']
