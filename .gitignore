@@ -29,3 +29,7 @@ __MACOSX/
 *.xlsx
 # ...but keep the provided example workbook
 !free-all-fta-example.xlsx
+
+# Python bytecode
+__pycache__/
+*.pyc
