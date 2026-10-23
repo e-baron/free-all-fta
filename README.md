@@ -434,8 +434,10 @@ Columns:
 - `MCS`: the cut set events, one per line, as `id - label` (label omitted if empty).
 - `w (frequency /h)`: frequency of the cut set, computed with the same AND formulas as the mode (Markov or pure).
 - `q (probability)` (pure mode only): `MIN(1, product(qi))` of the cut set.
+- `w (%)`: the cut-set w divided by the overall w result of the top gate (or the sum of top-gate results when the tree has multiple roots).
+- `q (%)` (pure mode only): the cut-set q divided by the overall q result of the top gate(s). It is left blank when the overall result is unavailable or zero.
 
-In pure mode, the `w` of an order-1 cut set is the event rate itself.
+Percentages are live Excel formulas. The Markov cut-set worksheet includes only `w (%)`; pure mode includes both `w (%)` and `q (%)`. They remain blank when the corresponding overall top-gate result is unavailable or zero. In pure mode, the `w` of an order-1 cut set is the event rate itself.
 
 ## Supported Event Model Types
 

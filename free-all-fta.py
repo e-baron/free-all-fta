@@ -322,13 +322,28 @@ def id_labels(*sheets) -> Dict[str, str]:
     return out
 
 
-def write_cut_sets_sheet(wb, mcs, formulas, with_q: bool, labels: Optional[Dict[str, str]] = None, src=None):
+def write_cut_sets_sheet(
+    wb,
+    mcs,
+    formulas,
+    with_q: bool,
+    labels: Optional[Dict[str, str]] = None,
+    src=None,
+    total_w_formula: str = "",
+    total_q_formula: str = "",
+):
     """formulas(ids) -> (w_formula, q_formula); empty string means no value. Rows are sorted by w descending; uncomputable w last."""
     labels = labels or {}
     if "cut-sets" in wb.sheetnames:
         del wb["cut-sets"]
     ws = wb.create_sheet("cut-sets")
-    ws.append(["order", "MCS", "w (frequency /h)"] + (["q (probability)"] if with_q else []))
+    headers_row = ["order", "MCS", "w (frequency /h)"]
+    if with_q:
+        headers_row.append("q (probability)")
+    headers_row.append("w (%)")
+    if with_q:
+        headers_row.append("q (%)")
+    ws.append(headers_row)
 
     # Only the events sheet keeps its cached values; other sheets were modified in memory.
     real = openpyxl.load_workbook(src, data_only=True) if src else None
@@ -360,18 +375,42 @@ def write_cut_sets_sheet(wb, mcs, formulas, with_q: bool, labels: Optional[Dict[
         rows.append((w_value(w), ids, w, q))
     rows.sort(key=lambda x: (x[0] == math.inf, -x[0] if x[0] != math.inf else 0))
 
+    w_col = 3
+    q_col = 4 if with_q else None
+    w_pct_col = 5 if with_q else 4
+    q_pct_col = 6 if with_q else None
     for _v, ids, w, q in rows:
         text = "\n".join(f"{i} - {labels[i]}" if labels.get(i) else i for i in ids)
-        ws.append([len(ids), text, w or None] + ([q or None] if with_q else []))
+        row_values = [len(ids), text, w or None]
+        if with_q:
+            row_values.append(q or None)
+        row_values.extend([None, None] if with_q else [None])
+        ws.append(row_values)
         r = ws.max_row
+        if total_w_formula:
+            ws.cell(r, w_pct_col).value = (
+                f'=IFERROR(IF({total_w_formula}=0,"",{get_column_letter(w_col)}{r}/{total_w_formula}),"")'
+            )
+        if with_q and total_q_formula:
+            ws.cell(r, q_pct_col).value = (
+                f'=IFERROR(IF({total_q_formula}=0,"",{get_column_letter(q_col)}{r}/{total_q_formula}),"")'
+            )
         for c in range(1, ws.max_column + 1):
             ws.cell(r, c).alignment = Alignment(wrap_text=(c == 2), vertical="top")
         for c in range(3, ws.max_column + 1):
             ws.cell(r, c).number_format = "0.000E+00"
+        ws.cell(r, w_pct_col).number_format = "0.00%"
+        if q_pct_col:
+            ws.cell(r, q_pct_col).number_format = "0.00%"
     ws.column_dimensions["A"].width = 8
     ws.column_dimensions["B"].width = 70
     ws.column_dimensions["C"].width = 20
     ws.column_dimensions["D"].width = 20
+    if with_q:
+        ws.column_dimensions["E"].width = 14
+        ws.column_dimensions["F"].width = 14
+    else:
+        ws.column_dimensions["D"].width = 14
     ws.freeze_panes = "A2"
     if ws.max_row >= 2:
         tab = Table(displayName="mcs_table", ref=f"A1:{get_column_letter(ws.max_column)}{ws.max_row}")
@@ -604,13 +643,24 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
             return ""
         return and_formula(ops)[0]
 
+    def markov_cut_formulas(ids):
+        ops = [evop(i) if i in erows else gop(i) for i in ids]
+        w_formula = markov_cut_w(ops)
+        return w_formula, ""
+
+    roots = [gid for gid in children if gid not in {ch for chs in children.values() for ch in chs}]
+    total_w_formula = ""
+    if roots and all(gid not in po for gid in roots):
+        total_w_formula = "SUM(" + ",".join(ref("gates", grows[gid], gc) for gid in roots) + ")"
+
     write_cut_sets_sheet(
         wb,
         minimal_cut_sets(children, gtypes, we, erows, em),
-        lambda ids: (markov_cut_w([evop(i) if i in erows else gop(i) for i in ids]), ""),
+        markov_cut_formulas,
         with_q=False,
         labels=id_labels(we, wg),
         src=src,
+        total_w_formula=total_w_formula,
     )
 
     update_table(we, "tbl_events")
@@ -824,7 +874,24 @@ def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: st
             wexpr = ops[0]["w"]
         return ("=" + wexpr if wexpr else ""), ("=" + qexpr if qexpr else "")
 
-    write_cut_sets_sheet(wb, minimal_cut_sets(children, gtypes, we, erows, em), cut_set_formulas, with_q=True, labels=id_labels(we, wg), src=src)
+    roots = [gid for gid in children if gid not in {ch for chs in children.values() for ch in chs}]
+    total_w_formula = ""
+    total_q_formula = ""
+    if roots and all(gid not in po for gid in roots):
+        total_w_formula = "SUM(" + ",".join(ref("gates", grows[gid], gc) for gid in roots) + ")"
+    if roots and all(gid in gate_has_q for gid in roots):
+        total_q_formula = "SUM(" + ",".join(ref("gates", grows[gid], gp) for gid in roots) + ")"
+
+    write_cut_sets_sheet(
+        wb,
+        minimal_cut_sets(children, gtypes, we, erows, em),
+        cut_set_formulas,
+        with_q=True,
+        labels=id_labels(we, wg),
+        src=src,
+        total_w_formula=total_w_formula,
+        total_q_formula=total_q_formula,
+    )
 
     for ws, tn in ((we, "tbl_events"), (wg, "tbl_gates")):
         update_table(ws, tn)
