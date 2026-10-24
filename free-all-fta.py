@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Markov-only allocative FTA updater with top-down safety-target propagation.
-Usage: python3 excel_to_pfta_alloc_v2.py workbook.xlsx --alloc
-Output: workbook_alloc.xlsx unless --alloc-out is used.
+Usage: python3 free-all-fta.py workbook.xlsx [--diag]
+Output: workbook_alloc.xlsx unless a custom output path is selected.
 """
 from __future__ import annotations
 import argparse, re, math
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from collections import defaultdict, OrderedDict
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -144,6 +146,8 @@ def parse_tree(ws, event_ids: Set[str], gate_ids: Set[str]):
         if current is None:
             continue
         lvl, rid, typ = current
+        if rid in gate_ids:
+            children[rid]
         if rid in gate_ids and typ and typ != "NULL":
             if typ not in ("AND", "OR"):
                 raise ValueError(f"Unsupported gate type '{typ}' for gate '{rid}'. Only AND/OR are accepted.")
@@ -158,6 +162,422 @@ def parse_tree(ws, event_ids: Set[str], gate_ids: Set[str]):
         for dlvl in [x for x in list(last_at_level) if x > lvl]:
             del last_at_level[dlvl]
     return {k: list(v.keys()) for k, v in children.items()}, gtype
+
+
+class Classification(str, Enum):
+    FREQUENCY = "FREQUENCY"
+    DIMENSIONLESS = "DIMENSIONLESS"
+    BOOLEAN_TRUE = "BOOLEAN_TRUE"
+    BOOLEAN_FALSE = "BOOLEAN_FALSE"
+    INVALID = "INVALID"
+
+
+@dataclass(frozen=True)
+class ClassificationResult:
+    node_id: str
+    classification: Classification
+    model: str
+    has_frequency: bool = False
+    has_valid_state_duration: bool = False
+    equivalent_restoration_time_available: bool = False
+    source_event_ids: Tuple[str, ...] = ()
+    source_event_details: Tuple[str, ...] = ()
+    source_gate_ids: Tuple[str, ...] = ()
+    reason_if_invalid: str = ""
+    multiplicity: bool = False
+    frequency_value: Optional[float] = None
+    mttr_value: Optional[float] = None
+    factor_value: Optional[float] = None
+
+    @property
+    def dimension(self) -> str:
+        if self.has_frequency or self.classification in (
+            Classification.FREQUENCY,
+        ):
+            return "FREQUENCY"
+        if self.classification == Classification.INVALID:
+            return "INVALID"
+        return "DIMENSIONLESS"
+
+    @property
+    def has_restoration_time(self) -> bool:
+        return self.equivalent_restoration_time_available
+
+    @property
+    def origin(self) -> str:
+        return self.classification.value
+
+    def describe(self) -> str:
+        labels = {
+            Classification.FREQUENCY: "FREQUENCY [1/h], MTTR [h] available",
+            Classification.DIMENSIONLESS: "DIMENSIONLESS [-]",
+            Classification.BOOLEAN_TRUE: "BOOLEAN_TRUE [-]",
+            Classification.BOOLEAN_FALSE: "BOOLEAN_FALSE [-]",
+            Classification.INVALID: f"INVALID / unknown model '{self.model}'",
+        }
+        return labels[self.classification]
+
+
+def _is_dimensionless_result(result: ClassificationResult) -> bool:
+    return result.dimension == "DIMENSIONLESS" or result.classification in (
+        Classification.BOOLEAN_TRUE,
+        Classification.BOOLEAN_FALSE,
+    )
+
+
+def _numeric_value(value):
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and not value.strip().startswith("="):
+        try:
+            return float(value.strip().replace(",", "."))
+        except ValueError:
+            return None
+    return None
+
+
+def _event_value_errors(eid: str, event_model: str, allocated, duration, raw_allocated=None, raw_duration=None) -> List[str]:
+    errors = []
+    value = _numeric_value(allocated)
+    if event_model in ("ConstantRate", "Fixed", "Probability", "Multiplicity") and allocated is None:
+        message = "allocated value formula could not be evaluated" if isinstance(raw_allocated, str) and raw_allocated.strip().startswith("=") else "allocated value is missing"
+        errors.append(f"ERROR: Invalid Markov event '{eid}' ({event_model}): {message}.")
+    elif value is None:
+        errors.append(f"ERROR: Invalid Markov event '{eid}' ({event_model}): allocated value must be numeric when evaluable.")
+    if value is not None and not math.isfinite(value):
+        errors.append(f"ERROR: Event '{eid}' ({event_model}) has a non-finite allocated value.")
+    elif value is not None:
+        if event_model in ("ConstantRate", "Fixed") and value < 0:
+            errors.append(f"ERROR: Event '{eid}' ({event_model}) frequency/rate must be non-negative [1/h].")
+        elif event_model == "Probability" and not 0 <= value <= 1:
+            errors.append(f"ERROR: Event '{eid}' Probability must be between 0 and 1 inclusive [-].")
+        elif event_model == "Multiplicity" and value < 0:
+            errors.append(f"ERROR: Event '{eid}' Multiplicity must be non-negative [-].")
+    if event_model in ("ConstantRate", "Fixed"):
+        if duration is None:
+            mttr_message = "formula could not be evaluated" if isinstance(raw_duration, str) and raw_duration.strip().startswith("=") else "missing"
+            errors.append(
+                f"ERROR: Invalid Markov event '{eid}'.\n\nModel: {event_model}\nFrequency: {allocated!r} [1/h]\nMTTR: {mttr_message}\n\n"
+                "The Markov model requires every ConstantRate and Fixed event to have a strictly positive MTTR [h]. "
+                "For a human or operational Fixed event, MTTR is the mean duration of the resulting erroneous or unsafe state; it is not repair of the person."
+            )
+        else:
+            t = _numeric_value(duration)
+            if t is None:
+                errors.append(f"ERROR: Event '{eid}' ({event_model}) MTTR formula/value could not be validated as numeric [h].")
+            elif t is not None and (not math.isfinite(t) or t <= 0):
+                errors.append(f"ERROR: Event '{eid}' ({event_model}) MTTR must be strictly positive [h].")
+    return errors
+
+
+def _invalid_gate_message(gid: str, typ: str, operands: List[ClassificationResult], reason: str) -> str:
+    child_lines = []
+    for operand in operands:
+        child_lines.append(f"  - {operand.node_id}: {operand.model} / {operand.describe()}")
+        if operand.model == "Gate" and operand.source_event_details:
+            child_lines.extend(f"      source: {detail}" for detail in operand.source_event_details)
+    children_text = "\n".join(child_lines)
+    return (
+        f"ERROR: Invalid Markov {typ} gate '{gid}'.\n\nIncompatible children:\n{children_text}\n\n"
+        f"{reason}\nAll combinations not explicitly supported by the Markov compatibility matrix are rejected."
+    )
+
+
+def _merge_sources(operands: List[ClassificationResult], gate_id: Optional[str] = None):
+    events = tuple(dict.fromkeys(event for item in operands for event in item.source_event_ids))
+    details = tuple(dict.fromkeys(detail for item in operands for detail in item.source_event_details))
+    gates = tuple(dict.fromkeys(gate for item in operands for gate in item.source_gate_ids))
+    if gate_id:
+        gates = tuple(dict.fromkeys((*gates, gate_id)))
+    return events, details, gates
+
+
+def _gate_classification(gid: str, classification: Classification, operands: List[ClassificationResult],
+                         has_state: bool = False, reason: str = "", frequency_value=None,
+                         mttr_value=None, factor_value=None) -> ClassificationResult:
+    events, details, gates = _merge_sources(operands, gid)
+    return ClassificationResult(
+        node_id=gid,
+        classification=classification,
+        model="Gate",
+        has_frequency=classification == Classification.FREQUENCY,
+        has_valid_state_duration=has_state,
+        equivalent_restoration_time_available=has_state,
+        source_event_ids=events,
+        source_event_details=details,
+        source_gate_ids=gates,
+        reason_if_invalid=reason,
+        multiplicity=any(o.multiplicity for o in operands),
+        frequency_value=frequency_value,
+        mttr_value=mttr_value,
+        factor_value=factor_value,
+    )
+
+
+def _validate_and(gid: str, operands: List[ClassificationResult]) -> ClassificationResult:
+    frequency = [o for o in operands if o.dimension == "FREQUENCY"]
+    invalid = [o for o in operands if o.dimension == "INVALID"]
+    if invalid:
+        raise ValueError(_invalid_gate_message(gid, "AND", invalid, "Unknown or unclassifiable operands are rejected by default."))
+    if not frequency:
+        if any(o.classification == Classification.BOOLEAN_FALSE for o in operands):
+            result_type = Classification.BOOLEAN_FALSE
+            factor_value = 0.0
+        elif operands and all(o.classification == Classification.BOOLEAN_TRUE for o in operands):
+            result_type = Classification.BOOLEAN_TRUE
+            factor_value = 1.0
+        else:
+            result_type = Classification.DIMENSIONLESS
+            values = [o.factor_value for o in operands]
+            factor_value = math.prod(values) if all(v is not None for v in values) else None
+        return _gate_classification(gid, result_type, operands, frequency_value=None, mttr_value=None,
+                                    reason="", has_state=False, factor_value=factor_value)
+    invalid_frequency = [o for o in frequency if not o.equivalent_restoration_time_available]
+    if invalid_frequency:
+        raise ValueError(_invalid_gate_message(
+            gid, "AND", invalid_frequency,
+            "Every ConstantRate and Fixed frequency operand must have a valid positive MTTR [h] before Markov calculation."
+        ))
+    t_values = [o.mttr_value for o in frequency]
+    w_values = [o.frequency_value for o in frequency]
+    mttr = (1.0 / sum(1.0 / t for t in t_values)) if len(frequency) > 1 and all(t and t > 0 for t in t_values) else (t_values[0] if len(frequency) == 1 else None)
+    if len(frequency) == 1:
+        frequency_value = w_values[0]
+    elif all(w is not None for w in w_values) and all(t is not None and t > 0 for t in t_values):
+        frequency_value = math.prod(w * t for w, t in zip(w_values, t_values)) * sum(1 / t for t in t_values)
+    else:
+        frequency_value = None
+    factors = [o.factor_value for o in operands if o.dimension == "DIMENSIONLESS"]
+    if any(o.classification == Classification.BOOLEAN_FALSE for o in operands):
+        frequency_value = 0.0
+    elif frequency_value is not None and factors and all(f is not None for f in factors):
+        frequency_value *= math.prod(factors)
+    return _gate_classification(gid, Classification.FREQUENCY, operands, has_state=True,
+                                frequency_value=frequency_value, mttr_value=mttr)
+
+
+def _validate_or(gid: str, operands: List[ClassificationResult]) -> ClassificationResult:
+    invalid = [o for o in operands if o.dimension == "INVALID" or (o.dimension == "DIMENSIONLESS" and o.multiplicity)]
+    if invalid:
+        raise ValueError(_invalid_gate_message(
+            gid, "OR", invalid,
+                "OR accepts only frequency operands or Probability/Boolean operands. Multiplicity allocation factors are AND-only and cannot be OR-combined, directly or through a factor-only gate."
+        ))
+    dims = {o.dimension for o in operands}
+    if len(dims) != 1:
+        raise ValueError(_invalid_gate_message(
+            gid, "OR", operands,
+            "Frequency [1/h] and dimensionless operands cannot be combined by OR. Use a consistent dimensional model for all OR branches."
+        ))
+    if dims == {"FREQUENCY"}:
+        if any(not o.equivalent_restoration_time_available for o in operands):
+            raise ValueError(_invalid_gate_message(gid, "OR", operands, "Every frequency operand must carry a valid positive MTTR [h]."))
+        w_values = [o.frequency_value for o in operands]
+        t_values = [o.mttr_value for o in operands]
+        total_w = sum(w_values) if all(w is not None for w in w_values) else None
+        mttr = (sum(w * t for w, t in zip(w_values, t_values)) / total_w) if total_w and total_w > 0 and all(t is not None for t in t_values) else None
+        return _gate_classification(gid, Classification.FREQUENCY, operands, has_state=mttr is not None,
+                                    frequency_value=total_w, mttr_value=mttr)
+    if dims == {"DIMENSIONLESS"}:
+        if any(o.classification == Classification.BOOLEAN_TRUE for o in operands):
+            classification = Classification.BOOLEAN_TRUE
+            factor_value = 1.0
+        elif all(o.classification == Classification.BOOLEAN_FALSE for o in operands):
+            classification = Classification.BOOLEAN_FALSE
+            factor_value = 0.0
+        else:
+            classification = Classification.DIMENSIONLESS
+            values = [o.factor_value for o in operands]
+            factor_value = min(1.0, sum(values)) if all(v is not None for v in values) else None
+        return _gate_classification(gid, classification, operands, factor_value=factor_value)
+    raise ValueError(_invalid_gate_message(gid, "OR", operands, "The gate output dimension cannot be determined."))
+
+
+def validate_cut_sets(cut_sets, classify_event, children, gate_types) -> List[str]:
+    """Apply the same AND compatibility rules to every Boolean-expanded cut set."""
+    errors = []
+    descendant_events = {}
+
+    def events_below(node):
+        if node in descendant_events:
+            return descendant_events[node]
+        if node not in children:
+            result = {node}
+        else:
+            result = set().union(*(events_below(child) for child in children[node])) if children[node] else set()
+        descendant_events[node] = result
+        return result
+
+    for index, ids in enumerate(cut_sets, start=1):
+        operands = [classify_event(eid) for eid in ids]
+        try:
+            _validate_and(f"CS-{index}", operands)
+        except ValueError:
+            missing_mttr = [o for o in operands if o.dimension == "FREQUENCY" and not o.equivalent_restoration_time_available]
+            if missing_mttr:
+                for operand in missing_mttr:
+                    errors.append(
+                        f"ERROR: Minimal cut set CS-{index} cannot be quantified.\n\n"
+                        f"Frequency-producing event '{operand.node_id}' uses model {operand.model} but has no valid MTTR.\n\n"
+                        "In the Markov model, every ConstantRate and Fixed event must have a frequency [1/h] and a strictly positive MTTR [h]. "
+                        "For a human or operational Fixed event, MTTR is the mean duration of the resulting erroneous or unsafe state."
+                    )
+                continue
+            invalid_gate_reports = []
+            cut_set_ids = set(ids)
+            for gid, typ in gate_types.items():
+                if typ != "AND":
+                    continue
+                contributing = []
+                contributing_events = []
+                for child in children.get(gid, []):
+                    event_ids = events_below(child) & cut_set_ids
+                    if event_ids:
+                        contributing.append(child)
+                        contributing_events.extend(sorted(event_ids))
+                child_operands = [classify_event(eid) for eid in dict.fromkeys(contributing_events)]
+                if len(contributing) > 1:
+                    try:
+                        _validate_and(gid, child_operands)
+                    except ValueError as exc:
+                        invalid_gate_reports.append(str(exc))
+            if invalid_gate_reports:
+                errors.extend(invalid_gate_reports)
+            else:
+                lines = "\n".join(f"  - {o.node_id}: {o.model} / {o.describe()}" for o in operands)
+                source_gates = tuple(dict.fromkeys(gate for operand in operands for gate in operand.source_gate_ids))
+                if not source_gates:
+                    source_gates = tuple(
+                        gid for gid in gate_types
+                        if events_below(gid) & cut_set_ids
+                    )
+                source_text = f"\nSource gates: {', '.join(source_gates)}" if source_gates else ""
+                errors.append(
+                    f"ERROR: Minimal cut set CS-{index} cannot be quantified by the supported Markov model.\n\nEvents:\n{lines}{source_text}\n\n"
+                    "A minimal cut set is quantified as an AND combination. One or more operands are unclassifiable or violate the supported Markov input requirements. "
+                    "Confirm each event model and ensure every ConstantRate and Fixed event has a valid frequency [1/h] and positive MTTR [h]."
+                )
+    return errors
+
+
+def validate_model(workbook, tree_name: str = "tree", value_workbook=None):
+    """Validate every selected-tree gate and every minimal cut set before outputs are touched."""
+    if "events" not in workbook.sheetnames or "gates" not in workbook.sheetnames:
+        raise ValueError("Workbook must contain 'events' and 'gates' worksheets.")
+    we, wg, wt = workbook["events"], workbook["gates"], tree_sheet(workbook, tree_name)
+    eh, erows = rows_by_id(we)
+    gh, grows = rows_by_id(wg)
+    eh, gh = headers(we), headers(wg)
+    for col in ("model_type", "allocated value", "mean_repair_time"):
+        if col not in eh:
+            raise ValueError(f"Missing events column: {col}")
+    for col in ("formula", "safety target"):
+        if col not in gh:
+            raise ValueError(f"Missing gates column: {col}")
+    children, gtypes = parse_tree(wt, set(erows), set(grows))
+    em = eh["model_type"]
+    memo: Dict[str, ClassificationResult] = {}
+    visiting: Set[str] = set()
+    errors: List[str] = []
+
+    def event_class(eid: str) -> ClassificationResult:
+        if eid in memo:
+            return memo[eid]
+        row = erows[eid]
+        m = model(we.cell(row, em).value)
+        raw_allocated = we.cell(row, eh["allocated value"]).value
+        raw_duration = we.cell(row, eh["mean_repair_time"]).value
+        allocated = _eval_cell(workbook, value_workbook, "events", row, eh["allocated value"], {}) if value_workbook is not None else raw_allocated
+        duration = _eval_cell(workbook, value_workbook, "events", row, eh["mean_repair_time"], {}) if value_workbook is not None else raw_duration
+        if m in ("ConstantRate", "Fixed", "Probability", "Multiplicity"):
+            errors.extend(_event_value_errors(eid, m, allocated, duration, raw_allocated, raw_duration))
+        if m in ("ConstantRate", "Fixed"):
+            rate = _numeric_value(allocated)
+            mttr = _numeric_value(duration)
+            has_t = mttr is not None and math.isfinite(mttr) and mttr > 0
+            result = ClassificationResult(
+                eid, Classification.FREQUENCY, m, has_frequency=True,
+                has_valid_state_duration=has_t,
+                equivalent_restoration_time_available=has_t,
+                source_event_ids=(eid,), source_event_details=(f"{eid}: {m} / FREQUENCY",),
+                frequency_value=rate, mttr_value=mttr,
+            )
+        elif m == "Probability":
+            result = ClassificationResult(eid, Classification.DIMENSIONLESS, m, source_event_ids=(eid,), factor_value=_numeric_value(allocated))
+        elif m == "Multiplicity":
+            result = ClassificationResult(eid, Classification.DIMENSIONLESS, m, multiplicity=True, source_event_ids=(eid,), factor_value=_numeric_value(allocated))
+        elif m == "True":
+            result = ClassificationResult(eid, Classification.BOOLEAN_TRUE, m, source_event_ids=(eid,), factor_value=1.0)
+        elif m == "False":
+            result = ClassificationResult(eid, Classification.BOOLEAN_FALSE, m, source_event_ids=(eid,), factor_value=0.0)
+        else:
+            result = ClassificationResult(eid, Classification.INVALID, m, reason_if_invalid=f"Unsupported event model '{m}'.", source_event_ids=(eid,))
+            errors.append(f"ERROR: Event '{eid}' has unsupported model '{m}' (unknown model). Supported models are ConstantRate, Fixed, Probability, Multiplicity, True, and False.")
+        memo[eid] = result
+        return result
+
+    def classify_gate(gid: str) -> ClassificationResult:
+        if gid in memo:
+            return memo[gid]
+        if gid in visiting:
+            raise ValueError(f"Cycle detected involving gate '{gid}'.")
+        visiting.add(gid)
+        chs = children.get(gid, [])
+        typ = gtypes.get(gid)
+        if not chs:
+            result = ClassificationResult(gid, Classification.INVALID, "Gate", reason_if_invalid="Gate has no children.", source_gate_ids=(gid,))
+            errors.append(f"ERROR: Gate '{gid}' has no children; its output dimension cannot be determined.")
+        elif typ not in ("AND", "OR"):
+            result = ClassificationResult(gid, Classification.INVALID, "Gate", reason_if_invalid="Missing gate type.", source_gate_ids=(gid,))
+            errors.append(f"ERROR: Gate '{gid}' has children but no recognized AND/OR type.")
+        else:
+            operands = []
+            for child in chs:
+                if child in erows:
+                    operands.append(event_class(child))
+                elif child in grows:
+                    operands.append(classify_gate(child))
+                else:
+                    operands.append(ClassificationResult(child, Classification.INVALID, "Unknown child", reason_if_invalid="Child ID is absent from events and gates."))
+            try:
+                result = _validate_and(gid, operands) if typ == "AND" else _validate_or(gid, operands)
+            except ValueError as exc:
+                errors.append(str(exc))
+                result = _gate_classification(gid, Classification.INVALID, operands, reason=str(exc))
+        visiting.remove(gid)
+        memo[gid] = result
+        return result
+
+    tree_node_ids = []
+    for row in range(2, wt.max_row + 1):
+        node_id = ""
+        for _level, id_col, _type_col in tree_cols(wt):
+            node_id = clean_id(wt.cell(row, id_col).value)
+            if node_id:
+                break
+        if node_id:
+            tree_node_ids.append(node_id)
+    for node_id in dict.fromkeys(tree_node_ids):
+        if node_id in erows:
+            event_class(node_id)
+        elif node_id in grows:
+            classify_gate(node_id)
+        else:
+            errors.append(f"ERROR: Tree node '{node_id}' is not defined in the events or gates worksheet.")
+    mcs = minimal_cut_sets(children, gtypes, we, erows, em)
+    errors.extend(validate_cut_sets(
+        mcs,
+        lambda eid: event_class(eid) if eid in erows else ClassificationResult(eid, Classification.INVALID, "Unknown"),
+        children,
+        gtypes,
+    ))
+    if errors:
+        raise ValueError("\n\n".join(errors) + "\n\nNo output files were generated.")
+    return {"events": we, "gates": wg, "tree": wt, "event_headers": eh, "event_rows": erows,
+            "gate_headers": gh, "gate_rows": grows, "children": children, "gate_types": gtypes,
+            "classifications": memo, "cut_sets": mcs}
 
 
 def update_table(ws, tname: str):
@@ -250,7 +670,7 @@ def minimal_cut_sets(children, gtypes, we, erows, em) -> List[Tuple[str, ...]]:
     allsets.sort(key=len)
     minimal: List[frozenset] = []
     for s in allsets:
-        if s and not any(m <= s for m in minimal):
+        if not any(m <= s for m in minimal):
             minimal.append(s)
     order = {}
     for lst in children.values():
@@ -261,53 +681,16 @@ def minimal_cut_sets(children, gtypes, we, erows, em) -> List[Tuple[str, ...]]:
     return out
 
 
-PROB_MODELS = ("Probability", "True", "False")
-
-
-def prob_only_gates(children, gtypes, erows, grows, event_model) -> Set[str]:
-    """Gates with no frequency: only Probability/True/False events or probability-only gates (plus Multiplicity events under AND)."""
-    memo: Dict[str, bool] = {}
-
-    def ok_event(g: str, c: str) -> bool:
-        m = event_model(c)
-        return m in PROB_MODELS or (m == "Multiplicity" and gtypes.get(g) == "AND")
-
-    def is_po(g: str) -> bool:
-        if g not in memo:
-            memo[g] = bool(children.get(g)) and all(
-                (c in erows and ok_event(g, c)) or (c in grows and is_po(c)) for c in children[g]
-            )
-        return memo[g]
-
-    return {g for g in grows if is_po(g)}
-
-
-def check_or_dimensions(gid, chs, po, erows, event_model):
-    """Raise if an OR gate mixes probability children and frequency children."""
-    prob, freq = [], []
-    for c in chs:
-        if c in po or (c in erows and event_model(c) in PROB_MODELS):
-            prob.append(c)
-        elif c not in erows or event_model(c) != "Multiplicity":
-            freq.append(c)
-    if prob and freq:
-        raise ValueError(
-            f"ERROR: Mixed dimensions at OR gate '{gid}': Probability and Frequency children cannot be directly combined. "
-            f"Probability children: {', '.join(prob)}; Frequency children: {', '.join(freq)}. "
-            f"E.g. '{prob[0]}' (probability) cannot be mixed with '{freq[0]}' (frequency) in an OR gate."
-        )
-
-
 def po_formula_text(typ: str, ops, prefix: str = "") -> str:
     ids = ", ".join(o["id"] for o in ops)
     if typ == "AND":
         if any(o["m"] == "Multiplicity" for o in ops):
-            core = "qEQ = MIN(1, ∏qi × ∏mi), qi = probability events/gates, mi = Multiplicity events"
+            core = "qEQ = ∏qi × ∏mi, qi = probability events/gates, mi = Multiplicity events"
         else:
-            core = "qEQ = MIN(1, ∏qi)"
+            core = "qEQ = ∏qi"
     else:
         core = "qEQ = MIN(1, Σqi)"
-    return f"{prefix}{typ} probability only: {core}; no λEQ; children: {ids}"
+    return f"{prefix}{typ} dimensionless Markov result: {core}; no frequency; children: {ids}"
 
 
 def id_labels(*sheets) -> Dict[str, str]:
@@ -399,7 +782,9 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
     dst = Path(out_xlsx).expanduser().resolve() if out_xlsx else src.with_name(src.stem + "_alloc" + src.suffix)
 
     wb = openpyxl.load_workbook(src, data_only=False)
-    we, wg, wt = wb["events"], wb["gates"], tree_sheet(wb, tree_name)
+    wb_values = openpyxl.load_workbook(src, data_only=True)
+    validated = validate_model(wb, tree_name, wb_values)
+    we, wg, wt = validated["events"], validated["gates"], validated["tree"]
 
     ensure_col(wg, "calculated frequency", after="safety target")
     ensure_col(wg, "calculated mean repair time", after="calculated frequency")
@@ -418,11 +803,14 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
         if c not in gh:
             raise ValueError(f"Missing gates column: {c}")
 
-    children, gtypes = parse_tree(wt, set(erows), set(grows))
+    children, gtypes = validated["children"], validated["gate_types"]
     em, ea, et = eh["model_type"], eh["allocated value"], eh["mean_repair_time"]
     gf, gt, gc, gm, gd = gh["formula"], gh["safety target"], gh["calculated frequency"], gh["calculated mean repair time"], gh["differences"]
     gp = gh["calculated probability"]
-    po = prob_only_gates(children, gtypes, erows, grows, lambda e: model(we.cell(erows[e], em).value))
+    po = {
+        gid for gid, result in validated["classifications"].items()
+        if gid in grows and _is_dimensionless_result(result)
+    }
 
     def propagate_safety_targets_top_down():
         """Top-down allocation through AND-only chains.
@@ -497,7 +885,7 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
         if m == "ConstantRate":
             return {"id": eid, "kind": "rate", "l": val, "T": T, "m": m}
         if m == "Fixed":
-            return {"id": eid, "kind": "rate", "l": val, "T": "", "m": m}
+            return {"id": eid, "kind": "rate", "l": val, "T": T, "m": m}
         if m == "Probability":
             return {"id": eid, "kind": "factor", "f": val, "m": m}
         if m == "Multiplicity":
@@ -506,44 +894,49 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
             return {"id": eid, "kind": "factor", "f": "1", "m": m}
         if m == "False":
             return {"id": eid, "kind": "factor", "f": "0", "m": m}
-        return {"id": eid, "kind": "rate", "l": val, "T": T, "m": m}
+        raise ValueError(f"Unsupported event model '{m}' for event '{eid}'.")
 
     def gop(gid: str):
         compute(gid)
         r = grows[gid]
         if gid in po:
-            return {"id": gid, "kind": "factor", "f": ref("gates", r, gp), "m": "Gate"}
-        has_t = gid in gate_has_t
+            semantic = validated["classifications"][gid]
+            constant = "0" if semantic.classification == Classification.BOOLEAN_FALSE else "1" if semantic.classification == Classification.BOOLEAN_TRUE else ref("gates", r, gp)
+            return {"id": gid, "kind": "factor", "f": constant, "m": "Gate"}
+        semantic = validated["classifications"][gid]
+        has_t = (
+            semantic.classification == Classification.FREQUENCY
+            and semantic.equivalent_restoration_time_available
+            and gid in gate_has_t
+        )
         return {"id": gid, "kind": "rate", "l": ref("gates", r, gc), "T": ref("gates", r, gm) if has_t else "", "m": "Gate"}
 
     def and_formula(ops):
         rates = [o for o in ops if o["kind"] == "rate"]
         factors = [o for o in ops if o["kind"] == "factor"]
-        trates = [o for o in rates if o["T"]]
-        frates = [o for o in rates if not o["T"]]
+        if any(not o["T"] for o in rates):
+            raise ValueError("Markov AND calculation received a frequency operand without validated MTTR.")
         fexpr = prod([o["f"] for o in factors])
         texpr = ""
-        if not trates:
+        if not rates:
             tpart = "1"
-        elif len(trates) == 1:
-            tpart = trates[0]["l"]
-            texpr = trates[0]["T"]
+        elif len(rates) == 1:
+            tpart = rates[0]["l"]
+            texpr = rates[0]["T"]
         else:
-            inv = [f"(1/{o['T']})" for o in trates]
-            tpart = prod([prod([f"({o['l']}*{o['T']})" for o in trates]), plus(inv)])
+            inv = [f"(1/{o['T']})" for o in rates]
+            tpart = prod([prod([f"({o['l']}*{o['T']})" for o in rates]), plus(inv)])
             texpr = f"(1/{plus(inv)})"
-        lexpr = prod([fexpr, tpart] + [o["l"] for o in frates])
+        lexpr = prod([fexpr, tpart])
         if not rates:
             text = "AND Markov: λEQ = factor-only product"
-        elif not trates:
-            text = "AND Markov: λEQ = " + " × ".join([o["id"] for o in factors] + [o["id"] for o in frates])
+        elif len(rates) == 1:
+            text = "AND Markov: λEQ = " + " × ".join([o["id"] for o in factors] + [rates[0]["id"]])
         else:
             text = "AND Markov: λEQ = " + "".join(o["id"] + " × " for o in factors)
-            text += ("∏(λi×Ti) × Σ(1/Ti), rate children with sdt: " + ", ".join(o["id"] for o in trates)) if len(trates) > 1 else trates[0]["id"]
-            if frates:
-                text += " × λFixedFrequency: " + ", ".join(o["id"] for o in frates)
-            text += "; TEQ = 1 / Σ(1/Ti) (children with sdt only)"
-        return "=" + lexpr, ("=" + texpr if texpr else ""), text
+            text += "∏(wi×Ti) × Σ(1/Ti), frequency children: " + ", ".join(o["id"] for o in rates)
+            text += "; TEQ = 1 / Σ(1/Ti)"
+        return "=" + lexpr, (texpr if texpr.startswith("=") else "=" + texpr if texpr else ""), text
 
     def or_formula(ops):
         rates = [o for o in ops if o["kind"] == "rate"]
@@ -552,11 +945,13 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
         lexpr = plus([o["l"] for o in rates] + [o["f"] for o in factors])
         texpr = ""
         if trates:
-            texpr = f"({plus([f'({o["l"]}*{o["T"]})' for o in trates])}/{plus([o['l'] for o in trates])})"
+            numerator = plus([f"({o['l']}*{o['T']})" for o in trates])
+            denominator = plus([o["l"] for o in trates])
+            texpr = f'=IFERROR(IF({denominator}=0,"",{numerator}/{denominator}),"")'
         text = "OR: λEQ = Σλi over children: " + ", ".join(o["id"] for o in ops)
         if trates:
             text += "; TEQ = Σ(λi×Ti) / Σλi (children with sdt only)"
-        return "=" + lexpr, ("=" + texpr if texpr else ""), text
+        return "=" + lexpr, (texpr if texpr.startswith("=") else "=" + texpr if texpr else ""), text
 
     def compute(gid: str):
         if gid in done:
@@ -578,13 +973,17 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
                     ops.append(gop(ch))
                 else:
                     raise ValueError(f"Child {ch} under {gid} not found in events/gates")
-            if typ == "OR":
-                check_or_dimensions(gid, chs, po, erows, lambda e: model(we.cell(erows[e], em).value))
             if gid in po:
-                fs = [o["f"] for o in ops]
-                qe = prod(fs) if typ == "AND" else plus(fs)
+                semantic = validated["classifications"][gid]
+                if semantic.classification == Classification.BOOLEAN_FALSE:
+                    qe = "0"
+                elif semantic.classification == Classification.BOOLEAN_TRUE:
+                    qe = "1"
+                else:
+                    fs = [o["f"] for o in ops]
+                    qe = prod(fs) if typ == "AND" else plus(fs)
                 wg.cell(r, gf).value = po_formula_text(typ, ops)
-                wg.cell(r, gp).value = f"=MIN(1,{qe})"
+                wg.cell(r, gp).value = f"=MIN(1,{qe})" if typ == "OR" else f"={qe}"
                 wg.cell(r, gc).value = None
                 wg.cell(r, gm).value = None
                 res = gp
@@ -631,7 +1030,7 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
 
     write_cut_sets_sheet(
         wb,
-        minimal_cut_sets(children, gtypes, we, erows, em),
+        validated["cut_sets"],
         markov_cut_formulas,
         labels=id_labels(we, wg),
         src=src,
@@ -647,9 +1046,11 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
         pass
     wb.save(dst)
     openpyxl.load_workbook(dst, data_only=False).close()
+    wb_values.close()
+    wb.close()
     return str(dst)
 
-# --- Native SVG FTA renderer v7 (no PFTA model, no Graphviz) -----------------
+# --- Native SVG FTA renderer v7 (no Graphviz) -------------------------------
 # Fixes: display evaluated values only (never formulas), same width for gates and
 # AND/OR operators, same height for AND/OR operators, larger fonts.
 import os, html as _html, shutil as _shutil, ast as _ast, operator as _operator
@@ -661,7 +1062,7 @@ _FONT = 'Courier New, Courier, monospace'
 _GATE_W = 245
 _TITLE_H = 76
 _ID_H = 26
-# PFTA-like operator: compact symbol + value box, not a huge distorted gate-wide arc
+# Compact gate symbol and value box, not a stretched gate-wide arc.
 _OP_W = _GATE_W
 _OP_H = 185
 _EVENT_VALUE_H = 84
@@ -869,6 +1270,7 @@ def _truthy(v):
 def _diagram_data(xlsx, tree_name="tree"):
     wbf = openpyxl.load_workbook(xlsx, data_only=False)
     wbv = openpyxl.load_workbook(xlsx, data_only=True)
+    validated = validate_model(wbf, tree_name, wbv)
     we, wg, wt = wbf['events'], wbf['gates'], tree_sheet(wbf, tree_name)
     eh, erows = rows_by_id(we); gh, grows = rows_by_id(wg)
     eh, gh = headers(we), headers(wg)
@@ -898,7 +1300,10 @@ def _diagram_data(xlsx, tree_name="tree"):
     # from events[Allocated value] and sdt from events[mean_repair_time].
     computed = {}
 
-    po = prob_only_gates(children, gtypes, erows, grows, lambda e: events[e]['model'])
+    po = {
+        gid for gid, result in validated["classifications"].items()
+        if gid in grows and _is_dimensionless_result(result)
+    }
 
     def as_num(v):
         return _num(v)
@@ -909,7 +1314,7 @@ def _diagram_data(xlsx, tree_name="tree"):
         if mt == 'ConstantRate':
             return {'kind': 'rate', 'w': as_num(e.get('alloc')), 'sdt': as_num(e.get('mrt'))}
         if mt == 'Fixed':
-            return {'kind': 'rate', 'w': as_num(e.get('alloc')), 'sdt': None}
+            return {'kind': 'rate', 'w': as_num(e.get('alloc')), 'sdt': as_num(e.get('mrt'))}
         if mt == 'Probability':
             return {'kind': 'factor', 'factor': as_num(e.get('alloc'))}
         if mt == 'Multiplicity':
@@ -918,7 +1323,7 @@ def _diagram_data(xlsx, tree_name="tree"):
             return {'kind': 'factor', 'factor': 1.0}
         if mt == 'False':
             return {'kind': 'factor', 'factor': 0.0}
-        return {'kind': 'rate', 'w': as_num(e.get('alloc')), 'sdt': as_num(e.get('mrt'))}
+        raise ValueError(f"Unsupported event model '{mt}' for event '{eid}'.")
 
     def gate_operand(gid):
         if gid in po:
@@ -929,57 +1334,26 @@ def _diagram_data(xlsx, tree_name="tree"):
     def compute_gate_value(gid):
         if gid in computed:
             return computed[gid]
-        if gid in po:
+        semantic = validated["classifications"].get(gid)
+        if semantic is None or semantic.dimension != "FREQUENCY":
             computed[gid] = (None, None)
             return computed[gid]
-        ops = []
-        for ch in children.get(gid, []):
-            if ch in erows:
-                ops.append(event_operand(ch))
-            elif ch in grows:
-                ops.append(gate_operand(ch))
-        typ = gtypes.get(gid)
-        rates = [o for o in ops if o.get('kind') == 'rate' and o.get('w') is not None]
-        factors = [o.get('factor') for o in ops if o.get('kind') == 'factor' and o.get('factor') is not None]
-        factor = 1.0
-        for f in factors:
-            factor *= f
-        w_val = None
-        sdt_val = None
-        if typ == 'AND':
-            usable_rates = [o for o in rates if o.get('sdt') not in (None, 0)]
-            fixed_rates = [o for o in rates if o.get('sdt') in (None, 0)]
-            fixed_prod = 1.0
-            for o in fixed_rates:
-                fixed_prod *= o['w']
-            if not usable_rates:
-                w_val = factor * fixed_prod if (factors or fixed_rates) else None
-            elif len(usable_rates) == 1:
-                w_val = factor * fixed_prod * usable_rates[0]['w']
-                sdt_val = usable_rates[0]['sdt']
-            else:
-                prod_lt = 1.0
-                sum_inv_t = 0.0
-                for o in usable_rates:
-                    prod_lt *= o['w'] * o['sdt']
-                    sum_inv_t += 1.0 / o['sdt']
-                w_val = factor * fixed_prod * prod_lt * sum_inv_t
-                sdt_val = 1.0 / sum_inv_t if sum_inv_t else None
-        elif typ == 'OR':
-            w_val = sum(o['w'] for o in rates)
-            trs = [o for o in rates if o.get('sdt') not in (None, 0)]
-            den = sum(o['w'] for o in trs)
-            if den:
-                sdt_val = sum(o['w'] * o['sdt'] for o in trs) / den
 
-        # Prefer workbook numeric values when they exist. If a cell contains a
-        # formula string or no cached value, _num returns None and fallback is used.
-        existing_w = as_num(gates.get(gid, {}).get('w'))
-        existing_sdt = as_num(gates.get(gid, {}).get('sdt'))
-        if existing_w is not None:
-            w_val = existing_w
-        if existing_sdt is not None:
-            sdt_val = existing_sdt
+        # Use the same recursive classification/calculation result as workbook
+        # validation. Re-evaluating nested formulas here can lose a valid MTTR
+        # when Excel has not populated cached formula values.
+        w_val = semantic.frequency_value
+        sdt_val = semantic.mttr_value if semantic.equivalent_restoration_time_available else None
+
+        # Formula caches may be stale because openpyxl writes formulas without
+        # recalculating their cached results. Use the same validated semantic
+        # calculation used to authorize workbook generation, not cached gate
+        # numbers that may describe an older formula/input state.
+        if semantic.dimension == "DIMENSIONLESS":
+            gates[gid]['q'] = semantic.factor_value
+        else:
+            gates[gid]['w'] = w_val
+            gates[gid]['sdt'] = sdt_val
         computed[gid] = (w_val, sdt_val)
         return computed[gid]
 
@@ -1072,7 +1446,7 @@ class FtaSvg:
         e=self.events.get(eid,{}); mt=e.get('model','Unknown')
         if mt in ('ConstantRate','Fixed'):
             out=[]
-            w=_fmt(e.get('alloc'),'/h'); s=_fmt(e.get('mrt'),'h') if mt=='ConstantRate' else ''
+            w=_fmt(e.get('alloc'),'/h'); s=_fmt(e.get('mrt'),'h')
             if w: out.append('w = '+w)
             if s: out.append('sdt = '+s)
             return out or ['w = ?']
@@ -1166,7 +1540,16 @@ class FtaSvg:
         self.line(cx,y+_TITLE_H+7+_ID_H,cx,cy-r)
 
 def build_diagrams(xlsx, diag_prefix=None, output_dir=None, tree_name="tree"):
-    src=Path(xlsx).expanduser().resolve(); out_dir=Path(output_dir).expanduser().resolve() if output_dir else Path(src.stem).resolve(); out_dir.mkdir(parents=True,exist_ok=True)
+    src=Path(xlsx).expanduser().resolve()
+    validation_wb = openpyxl.load_workbook(src, data_only=False)
+    validation_values = openpyxl.load_workbook(src, data_only=True)
+    try:
+        validate_model(validation_wb, tree_name, validation_values)
+    finally:
+        validation_wb.close()
+        validation_values.close()
+    out_dir=Path(output_dir).expanduser().resolve() if output_dir else Path(src.stem).resolve()
+    out_dir.mkdir(parents=True,exist_ok=True)
     dst=out_dir/src.name
     if src.resolve()!=dst.resolve(): _shutil.copy2(src,dst)
     data=_diagram_data(str(src), tree_name=tree_name); children,gtypes,erows,grows,events,gates,roots=data[:7]
@@ -1235,9 +1618,13 @@ def main():
     input_path = Path(args.excel).expanduser().resolve()
     tree_name = args.tree_name if args.tree_name is not None else "tree"
     try:
-        workbook = openpyxl.load_workbook(input_path, read_only=True, data_only=False)
-        tree_sheet(workbook, tree_name)
-        workbook.close()
+        workbook = openpyxl.load_workbook(input_path, data_only=False)
+        values_workbook = openpyxl.load_workbook(input_path, data_only=True)
+        try:
+            validate_model(workbook, tree_name, values_workbook)
+        finally:
+            workbook.close()
+            values_workbook.close()
     except ValueError as exc:
         raise SystemExit(f"Error: {exc}") from exc
     except FileNotFoundError:
@@ -1246,7 +1633,6 @@ def main():
     out_dir = args.diag_dir
     if out_dir is None:
         out_dir = str(input_path.with_suffix(""))
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     def build_markov() -> str:
         markov_out = args.markov_out or args.alloc_out
@@ -1260,6 +1646,7 @@ def main():
         print("OK markov: " + path)
         return path
 
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
     markov_path = build_markov()
 
     # Diagrams are generated only when explicitly requested.
