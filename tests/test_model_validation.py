@@ -317,8 +317,9 @@ class ModelValidationTests(unittest.TestCase):
             try:
                 gates = result_wb["gates"]
                 columns = fta.headers(gates)
-                self.assertEqual(gates.cell(2, columns["calculated frequency"]).value, "=0")
-                self.assertEqual(gates.cell(3, columns["calculated probability"]).value, "=0")
+                rows = fta.rows_by_id(gates)[1]
+                self.assertEqual(gates.cell(rows["TOP"], columns["calculated frequency"]).value, "=0")
+                self.assertTrue(gates.cell(rows["BOOL"], columns["calculated probability"]).value.startswith("="))
             finally:
                 result_wb.close()
 
@@ -401,6 +402,33 @@ class ModelValidationTests(unittest.TestCase):
             gate_data = data[5]["G"]
             self.assertAlmostEqual(gate_data["w"], 0.00025)
             self.assertEqual(gate_data["sdt"], 2)
+
+    def test_transfer_gate_link_targets_its_html_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            source = root_dir / "paged.xlsx"
+            root = ("ROOT", "OR", [("PAGE_GATE", "AND", ["R1", "R2"]), "R3"])
+            wb = workbook_for(tree(root, {"ROOT", "PAGE_GATE"}), {
+                "R1": "ConstantRate", "R2": "Fixed", "R3": "ConstantRate"
+            })
+            gates = wb["gates"]
+            page_col = gates.max_column + 1
+            gates.cell(1, page_col).value = "is_paged"
+            gates.cell(3, page_col).value = True
+            wb.save(source)
+            wb.close()
+
+            out_dir = root_dir / "diagrams"
+            html_path = Path(fta.build_diagrams(str(source), output_dir=out_dir))
+            html = html_path.read_text(encoding="utf-8")
+            root_svg = (out_dir / "paged_fta_main.svg").read_text(encoding="utf-8")
+            anchor = "fta-page-PAGE_GATE"
+            self.assertIn(f'id="{anchor}"', html)
+            self.assertIn(f'href="{html_path.name}#{anchor}" target="_top"', root_svg)
+            self.assertIn('href="#fta-page-ROOT"', html)
+            self.assertIn('href="#fta-page-PAGE_GATE"', html)
+            self.assertIn('<h2><a href="paged_fta_main.svg" target="_blank" rel="noopener">ROOT</a></h2>', html)
+            self.assertIn('<h2><a href="paged_fta_PAGE_GATE.svg" target="_blank" rel="noopener">PAGE_GATE</a></h2>', html)
 
 
 if __name__ == "__main__":

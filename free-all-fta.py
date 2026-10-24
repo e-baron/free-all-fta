@@ -1054,6 +1054,7 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
 # Fixes: display evaluated values only (never formulas), same width for gates and
 # AND/OR operators, same height for AND/OR operators, larger fonts.
 import os, html as _html, shutil as _shutil, ast as _ast, operator as _operator
+from urllib.parse import quote as _url_quote
 from openpyxl.utils.cell import coordinate_to_tuple as _coord_to_tuple
 
 _FILL = '#ffffdd'
@@ -1370,9 +1371,10 @@ def _diagram_data(xlsx, tree_name="tree"):
 
 
 class FtaSvg:
-    def __init__(self, data, page_files):
+    def __init__(self, data, page_files, page_hrefs=None):
         self.children, self.gtypes, self.erows, self.grows, self.events, self.gates, self.roots = data
         self.page_files = page_files
+        self.page_hrefs = page_hrefs or page_files
         self.pos = {}
         self.svg = []
 
@@ -1509,10 +1511,10 @@ class FtaSvg:
     def draw_leaf(self,nid,root,path):
         x,y,w,h=self.pos[('leaf',path)]
         if nid in self.grows:
-            href=self.page_files.get(nid,'')
+            href=self.page_hrefs.get(nid,'')
             tri_h = _OP_H
             pts=f'{x+w/2:.1f},{y:.1f} {x+w*.92:.1f},{y+tri_h:.1f} {x+w*.08:.1f},{y+tri_h:.1f}'
-            if href: self.svg.append(f'<a href="{self.esc(href)}">')
+            if href: self.svg.append(f'<a href="{self.esc(href)}" target="_top">')
             self.svg.append(f'<polygon points="{pts}" fill="{_FILL}" stroke="{_STROKE}" stroke-width="1.5"/>')
             box_w = _GATE_W
             id_h = _ID_H
@@ -1574,8 +1576,12 @@ def build_diagrams(xlsx, diag_prefix=None, output_dir=None, tree_name="tree"):
     for gid in grows:
         if gates.get(gid,{}).get('is_page') and gid in children and gid not in pages:
             collect_pages(gid)
-    prefix=diag_prefix or src.stem; page_files={gid:f"{prefix}_fta_{'main' if i==0 else gid}.svg" for i,gid in enumerate(pages)}
-    r=FtaSvg(data,page_files)
+    prefix=diag_prefix or src.stem
+    page_files={gid:f"{prefix}_fta_{'main' if i==0 else gid}.svg" for i,gid in enumerate(pages)}
+    html_file=out_dir/f'{prefix}_fta.html'
+    page_anchors={gid:f"fta-page-{_url_quote(gid, safe='')}" for gid in pages}
+    page_hrefs={gid:f"{html_file.name}#{page_anchors[gid]}" for gid in pages}
+    r=FtaSvg(data,page_files,page_hrefs)
     for gid in pages: r.render(gid,out_dir/page_files[gid])
     def page_links(parent=None):
         items=[]
@@ -1583,12 +1589,12 @@ def build_diagrams(xlsx, diag_prefix=None, output_dir=None, tree_name="tree"):
             if page_parents.get(gid) != parent:
                 continue
             nested=page_links(gid)
-            items.append(f'<li><a href="{_html.escape(page_files[gid])}">{_html.escape(gid)}</a>{nested}</li>')
+            items.append(f'<li><a href="#{_html.escape(page_anchors[gid], quote=True)}">{_html.escape(gid)}</a>{nested}</li>')
         return '<ul>'+''.join(items)+'</ul>' if items else ''
 
     links=page_links()
-    sections=''.join(f'<h2><a href="{_html.escape(page_files[g])}">{_html.escape(g)}</a></h2><object type="image/svg+xml" data="{_html.escape(page_files[g])}" style="width:100%;min-height:850px;border:1px solid #ddd"></object>' for g in pages)
-    html_file=out_dir/f'{prefix}_fta.html'; html_file.write_text(f"<!doctype html><html><head><meta charset='utf-8'><title>FTA diagrams</title></head><body><h1>FTA diagrams</h1><p>Workbook: <code>{_html.escape(src.name)}</code></p>{links}{sections}</body></html>",encoding='utf-8')
+    sections=''.join(f'<section id="{_html.escape(page_anchors[g], quote=True)}"><h2><a href="{_html.escape(page_files[g], quote=True)}" target="_blank" rel="noopener">{_html.escape(g)}</a></h2><object type="image/svg+xml" data="{_html.escape(page_files[g], quote=True)}" style="width:100%;min-height:850px;border:1px solid #ddd"></object></section>' for g in pages)
+    html_file.write_text(f"<!doctype html><html><head><meta charset='utf-8'><title>FTA diagrams</title></head><body><h1>FTA diagrams</h1><p>Workbook: <code>{_html.escape(src.name)}</code></p>{links}{sections}</body></html>",encoding='utf-8')
     return str(html_file.resolve())
 # --- End native SVG FTA renderer v7 -----------------------------------------
 
