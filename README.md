@@ -2,7 +2,7 @@
 
 ## Calculation model and scope
 
-The application implements one restricted, state-based Markov fault-tree calculation model only. It is not a general-purpose dynamic fault-tree solver. The former Pure Probability calculation mode has been removed and is not supported.
+The application implements one restricted, state-based Markov fault-tree calculation model only. It is not a general-purpose dynamic fault-tree solver.
 
 Every `ConstantRate` and `Fixed` event used by the selected tree must have a frequency $w$ in $1/h$ and a strictly positive `mean_repair_time` (displayed as MTTR) $T$ in hours. The two event types use the same Markov formulas today, but remain distinct: `ConstantRate` asserts a constant-rate stochastic failure process; `Fixed` identifies an externally supplied or externally calculated frequency. Retaining the distinction allows future models to treat them differently.
 
@@ -86,11 +86,90 @@ Probability/Boolean-only OR gates use the existing bounded-sum approximation $q_
 
 The output workbook includes a `cut-sets` worksheet formatted as an Excel table named `mcs_table`. Minimal cut sets are Boolean-expanded in memory and validated before any output is generated; each cut set uses the same AND semantics as gates. Output can include the updated workbook and, with `--diag`, SVG pages and an HTML index.
 
+### Conservative treatment of repeated events
+
+The `calculated frequency` reported for a gate is calculated recursively from the displayed fault-tree structure. At each gate, the application combines the equivalent frequency and MTTR of its direct children using the supported Markov AND or OR equations. It does not globally simplify repeated basic events across the complete tree before calculating gate frequencies.
+
+Consequently, if the same basic event contributes through several branches, overlapping contributions may be counted more than once. The recursive gate frequency may therefore overestimate the frequency that an exact Boolean- or dependency-aware quantification would produce. This behavior is intentionally retained as a conservative (pessimistic) approximation. In particular, the implemented treatment tends to be conservative for repeated-event contributions combined through OR paths because overlapping contributions are not explicitly subtracted.
+
+> **Important qualification:** “Conservative” is not a mathematical guarantee that the recursive result is an upper bound for every possible fault-tree topology or dependency structure.
+
+For example, consider `TOP = A OR (A AND B)`. Boolean simplification gives `TOP = A`, since $A\lor(A\land B)=A$. The recursive gate calculation instead evaluates the two displayed branches independently and may approximate $w_{TOP}=w_A+w_{(A\land B)}$. The `A AND B` contribution is retained even though it is Boolean-absorbed by `A`; when that contribution is positive, this produces a conservative result for this example. The displayed tree need not be incorrect: repeated events may intentionally occur on different functional or causal paths.
+
+Minimal-cut-set analysis is separate. Minimal cut sets are generated independently from the recursive gate calculation. During their generation, duplicate cut sets and non-minimal supersets are removed using Boolean logic. For example, the sets `{A}` and `{A, B}` reduce to `{A}` because occurrence of `A` alone is sufficient. Thus the two calculations have complementary purposes:
+
+- **Recursive gate calculation:** preserves the displayed fault-tree structure and applies Markov formulas gate by gate.
+- **Minimal-cut-set calculation:** performs Boolean minimization and identifies minimal combinations of basic events sufficient to produce the Top Event.
+
+Minimal cut sets may themselves overlap. Therefore, $\sum_i w_{MCS,i}$ is a rare-event approximation of the Top Event frequency when cut sets are not mutually exclusive; it is not asserted to be the exact Top Event frequency. A useful diagnostic is the MCS coverage:
+
+$$\mathrm{Coverage}_{MCS}=\frac{\sum_i w_{MCS,i}}{w_{TOP,recursive}}.$$
+
+Coverage close to 100% indicates numerical consistency between recursive gate quantification and minimal-cut-set quantification for the analyzed tree and assumptions. Deviations may result from repeated basic events, Boolean absorption, overlapping minimal cut sets, rare-event approximations, or different aggregation paths. Do not force or normalize this indicator to 100%: retaining comparison against the recursively calculated Top Event frequency makes it diagnostically useful. Nor should MCS contributions be redefined as $w_{MCS,i}/\sum_jw_{MCS,j}$ solely to force their sum to 100%.
+
 ## Appendix: Markov model compatibility and limitations
 
 ### Assumptions and unsupported behavior
 
 This restricted approximation assumes independence, constant frequency/rate values, constant effective restoration/state-ending rates, exponential Markov behavior, meaningful positive MTTR for every frequency-producing event, and rare-event applicability. The application does not support frequency operands without MTTR, frequency OR probability/Boolean, Multiplicity under OR, automatic probability/frequency conversion, automatic MTTR assignment, global MTTR/SDT, arbitrary dynamic or sequence-dependent gates, priority AND, functional dependency gates, automatic standby behavior, non-exponential duration behavior, implicit dependency or common-cause modeling, or automatic initiator/enabler interpretation.
+
+**Repeated basic events and Boolean dependencies:** The recursive gate calculation does not perform exact global Boolean quantification or dependency-aware reduction of repeated basic events. Repeated-event contributions appearing through multiple branches may therefore be counted more than once. The result is intentionally treated as a conservative approximation; minimal-cut-set analysis provides a complementary Boolean-reduced analysis.
+
+### Recursive quantification versus Boolean reduction
+
+The recursive gate-frequency calculation preserves the displayed fault-tree structure. It does not perform exact global Boolean quantification or dependency-aware reduction of repeated basic events. Repeated-event contributions appearing through multiple branches may therefore be counted more than once. This is intentionally treated as a conservative approximation, not as a formal upper-bound guarantee. Minimal-cut-set analysis is provided as a complementary Boolean-reduced analysis.
+
+The processing paths are distinct:
+
+**Recursive gate-frequency calculation**
+
+```text
+Basic events
+   ↓
+Local AND / OR Markov calculations
+   ↓
+Equivalent frequency + MTTR
+   ↓
+Propagation to parent gates
+   ↓
+Recursive Top Event frequency
+```
+
+**Minimal-cut-set calculation**
+
+```text
+Fault-tree Boolean structure
+   ↓
+Minimal-cut-set expansion
+   ↓
+Duplicate removal
+   ↓
+Superset / absorption removal
+   ↓
+Minimal cut sets
+   ↓
+Individual Markov quantification of each MCS
+```
+
+These are complementary calculations, not mathematically identical algorithms. The first retains the recursively displayed structure; the second performs Boolean minimization before quantification.
+
+#### Conservative treatment of repeated events
+
+The value reported as `calculated frequency` in the gates worksheet is obtained recursively by combining each gate's direct children with the supported Markov AND or OR equations. For `TOP = A OR (A AND B)`, Boolean reduction gives `TOP = A`, but the recursive calculation may evaluate $w_{TOP}=w_A+w_{(A\land B)}$. The overlapping `A AND B` contribution is not globally subtracted and may be counted in addition to `A`.
+
+This treatment tends to be conservative for repeated-event contributions combined through OR paths, because overlap is not explicitly removed. “Conservative” must not be interpreted as a mathematical guarantee that the recursive result is an upper bound for every topology or dependency structure. The fault-tree drawing itself may be intentional: repeated basic events can belong to distinct functional or causal paths.
+
+#### Minimal cut sets and MCS coverage
+
+Minimal cut sets are generated independently from recursive gate quantification. Duplicate cut sets and non-minimal supersets are removed according to Boolean logic. For example, `{A}` and `{A, B}` reduce to `{A}`, since `A` alone is sufficient.
+
+Individual MCS frequencies may overlap. Consequently, $\sum_iw_{MCS,i}$ is only a rare-event approximation of the Top Event frequency when the cut sets are not mutually exclusive; it is not an exact sum in general. Compare it with the recursive Top Event result using:
+
+$$\mathrm{Coverage}_{MCS}=\frac{\sum_iw_{MCS,i}}{w_{TOP,recursive}}.$$
+
+Coverage close to 100% indicates numerical consistency between the two approaches for the analyzed tree and assumptions. A deviation can result from repeated basic events, Boolean absorption, overlapping minimal cut sets, rare-event approximations, or different aggregation paths. Do not normalize contributions or force coverage to 100%; the difference is a useful diagnostic.
+
+The application does not implement exact Binary Decision Diagram (BDD) quantification, exact inclusion-exclusion quantification, exact repeated-event dependency treatment, or exact common-cause dependency treatment.
 
 ### Table A. Event model semantics
 
@@ -171,7 +250,6 @@ Choose the event model from the meaning and units of the input, not merely becau
 | Automatic probability-to-frequency conversion | **UNSUPPORTED** |
 | Dynamic/sequence-dependent gates or unsupported dependencies | **UNSUPPORTED** |
 | Automatic common-cause treatment | **UNSUPPORTED** |
-| Pure Probability calculation mode | **REMOVED / UNSUPPORTED** |
 
 > **All combinations not explicitly identified as ALLOWED are forbidden.**
 
