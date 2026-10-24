@@ -18,19 +18,53 @@ The calculations assume statistical independence unless dependence is explicitly
 
 Python tool to create Markov allocative fault-tree calculations in an Excel workbook and optionally generate SVG/HTML fault-tree diagrams.
 
-Requirements: Python 3.9+ and `openpyxl`.
+### Requirements
+
+- Python 3.9 or newer
+- `openpyxl`
+
+### Install on Windows
+
+Open PowerShell and install Python if it is not already available:
+
+```powershell
+winget install Python.Python.3.14
+```
+
+After installation, reopen PowerShell, go to the project folder, and install `openpyxl`:
+
+```powershell
+python --version
+python -m pip install openpyxl
+```
+
+If `python` is not recognized, reopen PowerShell or modify/reinstall Python with the option to add Python to `PATH` enabled.
+
+### Quick start on Windows
+
+Run these commands from the project folder:
+
+```powershell
+python free-all-fta.py free-all-fta-example.xlsx
+python free-all-fta.py free-all-fta-example.xlsx --diag
+python free-all-fta.py free-all-fta-example.xlsx --diag --diag-dir .\out --diag-prefix projectA
+```
+
+The first command creates `free-all-fta-example\free-all-fta-example_alloc.xlsx`. The diagram command also creates SVG pages and an HTML index in the selected output directory.
+
+### macOS / Linux
+
+Install Python 3.9+ and `openpyxl` using your platform's package manager, then run the same script with `python3` if that is the Python 3 command on your system:
 
 ```bash
 python3 -m pip install openpyxl
-python3 free-all-fta.py <excel-file> [options]
+python3 free-all-fta.py free-all-fta-example.xlsx --diag
 ```
 
-Quick examples:
+### Command syntax
 
-```bash
-python3 free-all-fta.py free-all-fta-example.xlsx
-python3 free-all-fta.py free-all-fta-example.xlsx --diag
-python3 free-all-fta.py free-all-fta-example.xlsx --diag --diag-dir ./out --diag-prefix projectA
+```powershell
+python free-all-fta.py <excel-file> [options]
 ```
 
 Options:
