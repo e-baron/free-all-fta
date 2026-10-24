@@ -326,24 +326,16 @@ def write_cut_sets_sheet(
     wb,
     mcs,
     formulas,
-    with_q: bool,
     labels: Optional[Dict[str, str]] = None,
     src=None,
     total_w_formula: str = "",
-    total_q_formula: str = "",
 ):
-    """formulas(ids) -> (w_formula, q_formula); empty string means no value. Rows are sorted by w descending; uncomputable w last."""
+    """Write minimal cut sets sorted by frequency, with live Excel percentage formulas."""
     labels = labels or {}
     if "cut-sets" in wb.sheetnames:
         del wb["cut-sets"]
     ws = wb.create_sheet("cut-sets")
-    headers_row = ["order", "MCS", "w (frequency /h)"]
-    if with_q:
-        headers_row.append("q (probability)")
-    headers_row.append("w (%)")
-    if with_q:
-        headers_row.append("q (%)")
-    ws.append(headers_row)
+    ws.append(["order", "MCS", "w (frequency /h)", "w (%)"])
 
     # Only the events sheet keeps its cached values; other sheets were modified in memory.
     real = openpyxl.load_workbook(src, data_only=True) if src else None
@@ -371,46 +363,30 @@ def write_cut_sets_sheet(
 
     rows = []
     for ids in mcs:
-        w, q = formulas(ids)
-        rows.append((w_value(w), ids, w, q))
+        w = formulas(ids)
+        rows.append((w_value(w), ids, w))
     rows.sort(key=lambda x: (x[0] == math.inf, -x[0] if x[0] != math.inf else 0))
 
     w_col = 3
-    q_col = 4 if with_q else None
-    w_pct_col = 5 if with_q else 4
-    q_pct_col = 6 if with_q else None
-    for _v, ids, w, q in rows:
+    w_pct_col = 4
+    for _v, ids, w in rows:
         text = "\n".join(f"{i} - {labels[i]}" if labels.get(i) else i for i in ids)
-        row_values = [len(ids), text, w or None]
-        if with_q:
-            row_values.append(q or None)
-        row_values.extend([None, None] if with_q else [None])
-        ws.append(row_values)
+        ws.append([len(ids), text, w or None, None])
         r = ws.max_row
         if total_w_formula:
             ws.cell(r, w_pct_col).value = (
                 f'=IFERROR(IF({total_w_formula}=0,"",{get_column_letter(w_col)}{r}/{total_w_formula}),"")'
-            )
-        if with_q and total_q_formula:
-            ws.cell(r, q_pct_col).value = (
-                f'=IFERROR(IF({total_q_formula}=0,"",{get_column_letter(q_col)}{r}/{total_q_formula}),"")'
             )
         for c in range(1, ws.max_column + 1):
             ws.cell(r, c).alignment = Alignment(wrap_text=(c == 2), vertical="top")
         for c in range(3, ws.max_column + 1):
             ws.cell(r, c).number_format = "0.000E+00"
         ws.cell(r, w_pct_col).number_format = "0.00%"
-        if q_pct_col:
-            ws.cell(r, q_pct_col).number_format = "0.00%"
     ws.column_dimensions["A"].width = 8
     ws.column_dimensions["B"].width = 70
     ws.column_dimensions["C"].width = 20
     ws.column_dimensions["D"].width = 20
-    if with_q:
-        ws.column_dimensions["E"].width = 14
-        ws.column_dimensions["F"].width = 14
-    else:
-        ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["D"].width = 14
     ws.freeze_panes = "A2"
     if ws.max_row >= 2:
         tab = Table(displayName="mcs_table", ref=f"A1:{get_column_letter(ws.max_column)}{ws.max_row}")
@@ -646,7 +622,7 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
     def markov_cut_formulas(ids):
         ops = [evop(i) if i in erows else gop(i) for i in ids]
         w_formula = markov_cut_w(ops)
-        return w_formula, ""
+        return w_formula
 
     roots = [gid for gid in children if gid not in {ch for chs in children.values() for ch in chs}]
     total_w_formula = ""
@@ -657,7 +633,6 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
         wb,
         minimal_cut_sets(children, gtypes, we, erows, em),
         markov_cut_formulas,
-        with_q=False,
         labels=id_labels(we, wg),
         src=src,
         total_w_formula=total_w_formula,
@@ -672,230 +647,6 @@ def build_markov_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: 
         pass
     wb.save(dst)
     openpyxl.load_workbook(dst, data_only=False).close()
-    return str(dst)
-
-
-
-
-
-def build_pure_workbook(xlsx: str, out_xlsx: Optional[str] = None, tree_name: str = "tree") -> str:
-    """Pure allocative FTA updater.
-
-    This mode does not use Markov formulas. It calculates probabilities with:
-      - AND: qEQ = product(qi)
-      - OR : qEQ = sum(qi)
-      - For ConstantRate/Fixed events: qi = 1 - EXP(-(lambda_i * T_i))
-      - Equivalent intensity/frequency: wEQ = qEQ / TEQ
-
-    The existing --alloc Markov workflow is intentionally untouched.
-    """
-    src = Path(xlsx).expanduser().resolve()
-    dst = Path(out_xlsx).expanduser().resolve() if out_xlsx else src.with_name(src.stem + "_pure" + src.suffix)
-
-    wb = openpyxl.load_workbook(src, data_only=False)
-    we, wg, wt = wb["events"], wb["gates"], tree_sheet(wb, tree_name)
-
-    ensure_col(wg, "calculated frequency", after="safety target")
-    ensure_col(wg, "calculated mean repair time", after="calculated frequency")
-    ensure_col(wg, "differences", after="calculated mean repair time")
-    ensure_col(wg, "calculated probability", after="differences")
-    ensure_col(wg, "Formula")
-
-    eh, erows = rows_by_id(we)
-    gh, grows = rows_by_id(wg)
-    eh, gh = headers(we), headers(wg)
-
-    for c in ("model_type", "allocated value", "mean_repair_time"):
-        if c not in eh:
-            raise ValueError(f"Missing events column: {c}")
-    for c in ("formula", "calculated frequency", "calculated mean repair time", "calculated probability"):
-        if c not in gh:
-            raise ValueError(f"Missing gates column: {c}")
-
-    children, gtypes = parse_tree(wt, set(erows), set(grows))
-    em, ea, et = eh["model_type"], eh["allocated value"], eh["mean_repair_time"]
-    ep = eh.get("probability")
-    gf, gc, gm, gp = gh["formula"], gh["calculated frequency"], gh["calculated mean repair time"], gh["calculated probability"]
-    gd, gt = gh.get("differences"), gh.get("safety target")
-    po = prob_only_gates(children, gtypes, erows, grows, lambda e: model(we.cell(erows[e], em).value))
-
-    visiting: Set[str] = set()
-    done: Set[str] = set()
-    gate_has_t: Set[str] = set()
-    gate_has_q: Set[str] = set()
-
-    def evop(eid: str):
-        r = erows[eid]
-        m = model(we.cell(r, em).value)
-        lam = ref("events", r, ea)
-        T = ref("events", r, et)
-        if m == "Fixed":
-            # Fixed frequency: no T, no q of its own, w = lambda.
-            return {"id": eid, "q": "", "raw_q": "", "w": lam, "T": "", "m": m, "fixed": True}
-        if m == "ConstantRate":
-            # Pure probability of at least one occurrence during T.
-            q = f"(1-EXP(-({lam}*{T})))"
-            return {"id": eid, "q": q, "raw_q": q, "w": lam, "T": T, "m": m}
-        if m == "Probability":
-            q = ref("events", r, ep) if ep and we.cell(r, ep).value not in (None, "") else lam
-            return {"id": eid, "q": q, "raw_q": q, "w": "", "T": "", "m": m}
-        if m == "Multiplicity":
-            # Multiplicity is a factor, not a probability, but it participates
-            # in the raw probability expression for the parent gate.
-            return {"id": eid, "q": lam, "raw_q": lam, "w": "", "T": "", "m": m}
-        if m == "True":
-            return {"id": eid, "q": "1", "raw_q": "1", "w": "", "T": "", "m": m}
-        if m == "False":
-            return {"id": eid, "q": "0", "raw_q": "0", "w": "", "T": "", "m": m}
-        q = f"(1-EXP(-({lam}*{T})))"
-        return {"id": eid, "q": q, "raw_q": q, "w": lam, "T": T, "m": m}
-
-    def gop(gid: str):
-        compute(gid)
-        r = grows[gid]
-        if gid in po:
-            q_ref = ref("gates", r, gp)
-            return {"id": gid, "q": q_ref, "raw_q": q_ref, "w": "", "T": "", "m": "Gate"}
-        w_ref = ref("gates", r, gc)
-        if gid not in gate_has_t:
-            return {"id": gid, "q": ref("gates", r, gp) if gid in gate_has_q else "", "raw_q": "", "w": w_ref, "T": "", "m": "Gate", "fixed": True}
-        t_ref = ref("gates", r, gm)
-        # For parent w calculations, do not reuse the capped q of a child gate.
-        # Reconstruct the child raw probability as w_child * T_child.
-        return {
-            "id": gid,
-            "q": ref("gates", r, gp),
-            "raw_q": f"({w_ref}*{t_ref})",
-            "w": w_ref,
-            "T": t_ref,
-            "m": "Gate",
-        }
-
-    def max_expr(parts: List[str]) -> str:
-        ps = [p for p in parts if p]
-        if not ps:
-            return ""
-        if len(ps) == 1:
-            return ps[0]
-        return "MAX(" + ",".join(ps) + ")"
-
-    def pure_formula(typ: str, ops):
-        # Fixed-frequency operands (no T) only contribute their w; q is used wherever a child has one.
-        fixed = [o for o in ops if o.get("fixed")]
-        qparts = [o["q"] for o in ops if o.get("q") not in (None, "")]
-        raw_qparts = [o["raw_q"] for o in ops if o.get("raw_q") not in (None, "")]
-        wparts = [o["w"] for o in ops if o.get("w") not in (None, "")]
-        tparts = [o["T"] for o in ops if o.get("T") not in (None, "")]
-        texpr = max_expr(tparts)
-        has_q = bool(qparts)
-
-        if typ == "AND":
-            raw_for_w = prod(raw_qparts + [o["w"] for o in fixed])
-            qexpr = f"MIN(1,{prod(qparts)})" if has_q else ""
-            wexpr = f"({raw_for_w}/{texpr})" if texpr else (raw_for_w if fixed else "")
-            text = (
-                "PURE AND: ConstantRate qi = 1-EXP(-(lambda_i*T_i)); Fixed events: no T, wi = lambda, q not used; "
-                "qEQ = MIN(1, product(qi)) over children having a q; "
-                "wEQ = raw_product(qi) / T × product(wFixed) before MIN saturation; "
-                "for a child gate raw_q_child = w_child*T_child; T = MAX(Ti) over children with T "
-                "(no T if there is no ConstantRate; no q if no child has a q); children: "
-            )
-        else:
-            raw_for_w = plus(raw_qparts)
-            qexpr = f"MIN(1,{plus(qparts)})" if has_q else ""
-            # For OR, frequency/intensity is additive. This is the key
-            # correction compared with raw_q/T when one branch is already capped.
-            wexpr = plus(wparts) if wparts else (f"({raw_for_w}/{texpr})" if texpr else "")
-            text = (
-                "PURE OR: ConstantRate qi = 1-EXP(-(lambda_i*T_i)); Fixed branches are excluded from q; "
-                "qEQ = MIN(1, sum(qi)); "
-                "wEQ = sum(wi) for rate/gate branches, not capped_q/T; "
-                "T = MAX(Ti) over children with T (no T if there is no ConstantRate; no q if no child has a q); children: "
-            )
-        text += ", ".join(o["id"] for o in ops)
-        return qexpr, texpr, wexpr, text
-
-    def compute(gid: str):
-        if gid in done:
-            return
-        if gid in visiting:
-            raise ValueError(f"Cycle detected involving gate {gid}")
-        visiting.add(gid)
-        chs = children.get(gid, [])
-        r = grows[gid]
-        if chs:
-            typ = gtypes.get(gid)
-            if typ not in ("AND", "OR"):
-                raise ValueError(f"Gate {gid} has children but no AND/OR type")
-            ops = []
-            for ch in chs:
-                if ch in erows:
-                    ops.append(evop(ch))
-                elif ch in grows:
-                    ops.append(gop(ch))
-                else:
-                    raise ValueError(f"Child {ch} under {gid} not found in events/gates")
-            if typ == "OR":
-                check_or_dimensions(gid, chs, po, erows, lambda e: model(we.cell(erows[e], em).value))
-            qexpr, texpr, wexpr, txt = pure_formula(typ, ops)
-            if gid in po:
-                txt = po_formula_text(typ, ops, "PURE ")
-                texpr = wexpr = ""
-            wg.cell(r, gf).value = txt
-            wg.cell(r, gp).value = "=" + qexpr if qexpr else None
-            if qexpr:
-                gate_has_q.add(gid)
-            wg.cell(r, gm).value = "=" + texpr if texpr else None
-            if texpr:
-                gate_has_t.add(gid)
-            # In --pure, q is capped with MIN(1,...), but w must be derived
-            # from the raw/uncapped probability expression. Otherwise a branch
-            # with multiplicity can saturate q to 1 and incorrectly give w=1/T.
-            wg.cell(r, gc).value = "=" + wexpr if wexpr else None
-            if gd and gt:
-                res = gp if gid in po else gc
-                wg.cell(r, gd).value = f'=IF({ref("gates", r, gt, False)}="","",{ref("gates", r, gt, False)}-{ref("gates", r, res, False)})'
-        visiting.remove(gid)
-        done.add(gid)
-
-    for gid in list(grows):
-        if gid in children:
-            compute(gid)
-
-    if gd:
-        dr = f"{get_column_letter(gd)}2:{get_column_letter(gd)}{wg.max_row}"
-        wg.conditional_formatting.add(dr, CellIsRule(operator="greaterThanOrEqual", formula=["0"], fill=GREEN_FILL))
-        wg.conditional_formatting.add(dr, CellIsRule(operator="lessThan", formula=["0"], fill=RED_FILL))
-
-    def cut_set_formulas(ids):
-        ops = [evop(i) if i in erows else gop(i) for i in ids]
-        qexpr, _t, wexpr, _txt = pure_formula("AND", ops)
-        if len(ops) == 1 and ops[0]["w"]:
-            wexpr = ops[0]["w"]
-        return ("=" + wexpr if wexpr else ""), ("=" + qexpr if qexpr else "")
-
-    roots = [gid for gid in children if gid not in {ch for chs in children.values() for ch in chs}]
-    total_w_formula = ""
-    total_q_formula = ""
-    if roots and all(gid not in po for gid in roots):
-        total_w_formula = "SUM(" + ",".join(ref("gates", grows[gid], gc) for gid in roots) + ")"
-    if roots and all(gid in gate_has_q for gid in roots):
-        total_q_formula = "SUM(" + ",".join(ref("gates", grows[gid], gp) for gid in roots) + ")"
-
-    write_cut_sets_sheet(
-        wb,
-        minimal_cut_sets(children, gtypes, we, erows, em),
-        cut_set_formulas,
-        with_q=True,
-        labels=id_labels(we, wg),
-        src=src,
-        total_w_formula=total_w_formula,
-        total_q_formula=total_q_formula,
-    )
-
-    for ws, tn in ((we, "tbl_events"), (wg, "tbl_gates")):
-        update_table(ws, tn)
-    wb.save(dst)
     return str(dst)
 
 # --- Native SVG FTA renderer v7 (no PFTA model, no Graphviz) -----------------
@@ -1115,7 +866,7 @@ def _truthy(v):
     if isinstance(v, bool): return v
     return False if v is None else str(v).strip().lower() in ('true','yes','y','1','x')
 
-def _diagram_data(xlsx, pure=False, tree_name="tree"):
+def _diagram_data(xlsx, tree_name="tree"):
     wbf = openpyxl.load_workbook(xlsx, data_only=False)
     wbv = openpyxl.load_workbook(xlsx, data_only=True)
     we, wg, wt = wbf['events'], wbf['gates'], tree_sheet(wbf, tree_name)
@@ -1130,7 +881,6 @@ def _diagram_data(xlsx, pure=False, tree_name="tree"):
             'model': mt,
             'alloc': _eval_cell(wbf, wbv, 'events', r, eh.get('allocated value'), memo),
             'mrt': _eval_cell(wbf, wbv, 'events', r, eh.get('mean_repair_time'), memo),
-            'prob': _eval_cell(wbf, wbv, 'events', r, eh.get('probability'), memo) if eh.get('probability') else None,
         }
     page_col = gh.get('is_paged') or gh.get('is_page')
     for gid, r in grows.items():
@@ -1233,137 +983,21 @@ def _diagram_data(xlsx, pure=False, tree_name="tree"):
         computed[gid] = (w_val, sdt_val)
         return computed[gid]
 
-    # In Markov/--alloc diagrams, compute missing display values with the Markov
-    # fallback. In --pure diagrams, do NOT run this Markov fallback because it can
-    # overwrite the workbook values from gates[calculated frequency] and
-    # gates[calculated mean repair time] with Markov-equivalent values.
-    # For --pure, gate_pure() below first keeps the evaluated workbook values and
-    # only computes q/w/t as a fallback when the workbook value is unavailable.
-    if not pure:
-        for gid in grows:
-            if gid in children:
-                w_val, sdt_val = compute_gate_value(gid)
-                gates[gid]['w'] = w_val
-                gates[gid]['sdt'] = sdt_val
-
-    if pure:
-        pure_done = {}
-        def event_pure(eid):
-            e = events[eid]
-            mt = e.get('model')
-            w = as_num(e.get('alloc'))
-            t = as_num(e.get('mrt'))
-            if mt == 'Fixed':
-                return None, w, None, None
-            if mt == 'Probability':
-                q = as_num(e.get('prob'))
-                if q is None:
-                    q = as_num(e.get('alloc'))
-                return q, None, None, q
-            if mt == 'Multiplicity':
-                m = as_num(e.get('alloc'))
-                return m, None, None, m
-            if mt == 'True':
-                return 1.0, None, None, 1.0
-            if mt == 'False':
-                return 0.0, None, None, 0.0
-            q = 1.0 - math.exp(-(w * t)) if w is not None and t is not None else None
-            return q, w, t, q
-
-        def gate_pure(gid):
-            if gid in pure_done:
-                return pure_done[gid]
-            qs, raw_qs, ws, ts, wfix = [], [], [], [], []
-            for ch in children.get(gid, []):
-                if ch in erows:
-                    q, w, t, raw_q = event_pure(ch)
-                elif ch in grows:
-                    q, w, t, raw_q = gate_pure(ch)
-                else:
-                    continue
-                if q is not None:
-                    qs.append(q)
-                if raw_q is not None:
-                    raw_qs.append(raw_q)
-                if w is not None:
-                    ws.append(w)
-                    if t in (None, 0):
-                        wfix.append(w)
-                if t not in (None, 0):
-                    ts.append(t)
-            typ = gtypes.get(gid)
-            raw_qv = None
-            tv = max(ts) if ts else None
-            has_q = bool(qs)
-            if typ == 'AND':
-                qprod = 1.0
-                for q in qs:
-                    qprod *= q
-                qv = min(1.0, qprod) if has_q else None
-                raw_qv = 1.0
-                for rq in raw_qs:
-                    raw_qv *= rq
-                for f in wfix:
-                    raw_qv *= f
-            elif typ == 'OR':
-                qsum = sum(qs) if qs else None
-                qv = min(1.0, qsum) if (qsum is not None and has_q) else None
-                raw_qv = sum(raw_qs) if raw_qs else None
-            else:
-                qv = None
-            if typ == 'OR' and ws:
-                wv = sum(ws)
-            elif raw_qv is not None and tv not in (None, 0):
-                wv = raw_qv / tv
-            elif typ == 'AND' and wfix:
-                wv = raw_qv
-            else:
-                wv = None
-            # raw_q for a gate as seen by its parent: w*T, not capped q.
-            gate_raw_q = (wv * tv) if (wv is not None and tv not in (None, 0)) else (None if wv is not None else qv)
-
-            existing_q = as_num(gates[gid].get('q'))
-            existing_w = as_num(gates[gid].get('w'))
-            existing_t = as_num(gates[gid].get('sdt'))
-
-            # In --pure diagrams, display the values from the pure workbook
-            # gates sheet whenever available:
-            #   calculated probability      -> q
-            #   calculated frequency        -> w
-            #   calculated mean repair time -> t
-            # The recursive calculation below is only a fallback when a gate
-            # cell has no cached/evaluable numeric value.
-            gates[gid]['q'] = existing_q if existing_q is not None else qv
-            gates[gid]['w'] = existing_w if existing_w is not None else wv
-            gates[gid]['sdt'] = existing_t if existing_t is not None else tv
-
-            sel_w = as_num(gates[gid].get('w'))
-            sel_t = as_num(gates[gid].get('sdt'))
-            selected_raw_q = (sel_w * sel_t) if (sel_w is not None and sel_t not in (None, 0)) else (None if sel_w is not None else gate_raw_q)
-            pure_done[gid] = (
-                as_num(gates[gid].get('q')),
-                sel_w,
-                sel_t,
-                selected_raw_q,
-            )
-            return pure_done[gid]
-
-        for gid in grows:
-            if gid in children:
-                gate_pure(gid)
+    for gid in grows:
+        if gid in children:
+            w_val, sdt_val = compute_gate_value(gid)
+            gates[gid]['w'] = w_val
+            gates[gid]['sdt'] = sdt_val
 
     all_gate_children = {ch for chs in children.values() for ch in chs if ch in grows}
     roots = [gid for gid in grows if gid in children and gid not in all_gate_children] or ([next(iter(grows))] if grows else [])
     wbf.close(); wbv.close()
-    return children, gtypes, erows, grows, events, gates, roots, pure
+    return children, gtypes, erows, grows, events, gates, roots
+
 
 class FtaSvg:
     def __init__(self, data, page_files):
-        if len(data) == 8:
-            self.children, self.gtypes, self.erows, self.grows, self.events, self.gates, self.roots, self.pure = data
-        else:
-            self.children, self.gtypes, self.erows, self.grows, self.events, self.gates, self.roots = data
-            self.pure = False
+        self.children, self.gtypes, self.erows, self.grows, self.events, self.gates, self.roots = data
         self.page_files = page_files
         self.pos = {}
         self.svg = []
@@ -1417,15 +1051,6 @@ class FtaSvg:
     def texts(self, lines, cx, y, cls=''):
         c = f' class="{cls}"' if cls else ''
         for i,l in enumerate(lines): self.svg.append(f'<text{c} x="{cx:.1f}" y="{y+i*16:.1f}" text-anchor="middle">{self.esc(l)}</text>')
-    def _pure_lines_for_gate(self,gid):
-        lines=[]
-        q=_fmt(self.gates.get(gid,{}).get('q'))
-        w=_fmt(self.gates.get(gid,{}).get('w'),'/h')
-        t=_fmt(self.gates.get(gid,{}).get('sdt'),'h')
-        if q: lines.append('q = '+q)
-        if w: lines.append('w = '+w)
-        if t: lines.append('t = '+t)
-        return lines or [self.gtypes.get(gid,'GATE')]
     def _markov_lines_for_gate(self,gid):
         g=self.gates.get(gid,{})
         lines=[]
@@ -1437,45 +1062,14 @@ class FtaSvg:
             if q: lines.append('q = '+q)
         return lines
     def op_lines(self,gid):
-        if getattr(self,'pure',False):
-            return self._pure_lines_for_gate(gid)
         return self._markov_lines_for_gate(gid) or [self.gtypes.get(gid,'GATE')]
     def transfer_lines(self,gid):
         lines=[gid]
-        if getattr(self,'pure',False):
-            lines += self._pure_lines_for_gate(gid)
-            return lines
         return lines + self._markov_lines_for_gate(gid)
     def transfer_value_lines(self,gid):
-        if getattr(self,'pure',False):
-            return self._pure_lines_for_gate(gid)
         return self._markov_lines_for_gate(gid)
     def event_lines(self,eid):
         e=self.events.get(eid,{}); mt=e.get('model','Unknown')
-        if getattr(self,'pure',False):
-            if mt == 'Fixed':
-                w=_fmt(e.get('alloc'),'/h')
-                return ['w = '+w] if w else [mt]
-            if mt == 'ConstantRate':
-                w0=_num(e.get('alloc')); t0=_num(e.get('mrt'))
-                q=_fmt((1.0 - math.exp(-(w0*t0))) if w0 is not None and t0 is not None else None)
-                w=_fmt(e.get('alloc'),'/h')
-                t=_fmt(e.get('mrt'),'h')
-                out=[]
-                if q: out.append('q = '+q)
-                if w: out.append('w = '+w)
-                if t: out.append('t = '+t)
-                return out or [mt]
-            if mt == 'Probability':
-                q=_fmt(e.get('prob')) or _fmt(e.get('alloc'))
-                return ['q = '+q] if q else [mt]
-            if mt == 'Multiplicity':
-                m=_fmt(e.get('alloc'))
-                return ['m = '+m] if m else [mt]
-            if mt == 'True': return ['q = 1']
-            if mt == 'False': return ['q = 0']
-            q=_fmt(e.get('prob')) or _fmt(e.get('alloc'))
-            return ['q = '+q] if q else [mt]
         if mt in ('ConstantRate','Fixed'):
             out=[]
             w=_fmt(e.get('alloc'),'/h'); s=_fmt(e.get('mrt'),'h') if mt=='ConstantRate' else ''
@@ -1491,7 +1085,7 @@ class FtaSvg:
         self.rect(x,y,w,h)
         self.texts(lines, x+w/2, y+17, 'val')
     def _op_value_box_geometry(self,x,y,w,h):
-        box_h = 58 if getattr(self,'pure',False) else 42
+        box_h = 42
         box_w = _GATE_W
         box_x = x + w/2 - box_w/2
         box_y = y + h/2 - box_h/2
@@ -1548,7 +1142,7 @@ class FtaSvg:
             self.svg.append(f'<polygon points="{pts}" fill="{_FILL}" stroke="{_STROKE}" stroke-width="1.5"/>')
             box_w = _GATE_W
             id_h = _ID_H
-            val_h = 58 if getattr(self,'pure',False) else 42
+            val_h = 42
             gap = 16
             group_h = id_h + gap + val_h
             box_x = x + w/2 - box_w/2
@@ -1565,17 +1159,17 @@ class FtaSvg:
         cx=x+w/2; cy=y+_TITLE_H+_ID_H+_EVENT_VALUE_H/2+26; r=_EVENT_VALUE_H/2
         self.svg.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="{_FILL}" stroke="{_STROKE}" stroke-width="1.5"/>')
         box_w = _GATE_W
-        box_h = 58 if getattr(self,'pure',False) else 42
+        box_h = 42
         box_x = cx - box_w/2
         box_y = cy - box_h/2
         self._value_box(box_x, box_y, box_w, box_h, self.event_lines(nid))
         self.line(cx,y+_TITLE_H+7+_ID_H,cx,cy-r)
 
-def build_diagrams(xlsx, diag_prefix=None, output_dir=None, pure=False, tree_name="tree"):
+def build_diagrams(xlsx, diag_prefix=None, output_dir=None, tree_name="tree"):
     src=Path(xlsx).expanduser().resolve(); out_dir=Path(output_dir).expanduser().resolve() if output_dir else Path(src.stem).resolve(); out_dir.mkdir(parents=True,exist_ok=True)
     dst=out_dir/src.name
     if src.resolve()!=dst.resolve(): _shutil.copy2(src,dst)
-    data=_diagram_data(str(src), pure=pure, tree_name=tree_name); children,gtypes,erows,grows,events,gates,roots=data[:7]
+    data=_diagram_data(str(src), tree_name=tree_name); children,gtypes,erows,grows,events,gates,roots=data[:7]
     pages=[]
     page_parents={}
 
@@ -1619,9 +1213,7 @@ def main():
     ap = argparse.ArgumentParser(
         description=(
             "Allocative FTA Excel updater. By default the allocative model is Markov. "
-            "Use --pure to generate the pure-probability allocative workbook. "
-            "Use --diag only when diagrams are required. "
-            "When --diag is used without --markov/--pure, diagrams are generated for both models."
+            "Use --diag to generate Markov FTA diagrams."
         )
     )
     ap.add_argument("excel")
@@ -1629,27 +1221,16 @@ def main():
     # Backward-compatible / explicit model options.
     # --alloc is kept for older command lines, but allocative mode is now the default.
     ap.add_argument("--alloc", action="store_true", help="Backward-compatible no-op: allocative mode is now the default.")
-    ap.add_argument("--markov", action="store_true", help="Use Markov allocative formulas. This is the default when --pure is not given.")
-    ap.add_argument("--pure", action="store_true", help="Use pure-probability allocative formulas instead of Markov formulas.")
+    ap.add_argument("--markov", action="store_true", help="Explicitly select Markov allocative formulas.")
 
     # Output / diagram options.
     ap.add_argument("--diag", action="store_true", help="Generate FTA diagrams in addition to the Excel workbook.")
     ap.add_argument("--tree-name", default=None, help="Worksheet containing the FTA tree; defaults to 'tree'.")
     ap.add_argument("--alloc-out", default=None, help="Output path for the Markov workbook. Kept for backward compatibility.")
     ap.add_argument("--markov-out", default=None, help="Alias for --alloc-out.")
-    ap.add_argument("--pure-out", default=None, help="Output path for the pure-probability workbook.")
     ap.add_argument("--diag-prefix", default=None)
     ap.add_argument("--diag-dir", default=None)
     args = ap.parse_args()
-
-    if args.pure and args.markov:
-        raise SystemExit("Choose either --pure or --markov, not both.")
-
-    # Model selection rules:
-    #   - --pure or --markov explicitly scopes work to one model.
-    #   - without explicit model flags, Markov remains the default workbook mode.
-    #   - with --diag and no explicit model flag, generate diagrams for both models.
-    explicit_model = "pure" if args.pure else ("markov" if args.markov else None)
 
     input_path = Path(args.excel).expanduser().resolve()
     tree_name = args.tree_name if args.tree_name is not None else "tree"
@@ -1679,58 +1260,20 @@ def main():
         print("OK markov: " + path)
         return path
 
-    def build_pure() -> str:
-        pure_out = args.pure_out
-        if pure_out is None:
-            tree_suffix = f"_{tree_name}" if args.tree_name is not None else ""
-            pure_out = str(Path(out_dir) / (input_path.stem + tree_suffix + "_pure" + input_path.suffix))
-        try:
-            path = build_pure_workbook(str(input_path), pure_out, tree_name=tree_name)
-        except ValueError as exc:
-            raise SystemExit(str(exc)) from None
-        print("OK pure: " + path)
-        return path
-
-    outputs: Dict[str, str] = {}
-
-    if explicit_model == "pure":
-        outputs["pure"] = build_pure()
-    elif explicit_model == "markov":
-        outputs["markov"] = build_markov()
-    elif args.diag:
-        # For diagram runs without explicit model, generate all model outputs.
-        outputs["markov"] = build_markov()
-        outputs["pure"] = build_pure()
-    else:
-        # Non-diagram default remains Markov for backward compatibility.
-        outputs["markov"] = build_markov()
+    markov_path = build_markov()
 
     # Diagrams are generated only when explicitly requested.
     if args.diag:
-        if explicit_model == "pure":
-            diag_targets = [("pure", outputs["pure"])]
-        elif explicit_model == "markov":
-            diag_targets = [("markov", outputs["markov"])]
-        else:
-            diag_targets = [("markov", outputs["markov"]), ("pure", outputs["pure"])]
-
-        for model_name, workbook_path in diag_targets:
-            # Avoid filename collisions when generating both model diagram sets.
-            if args.diag_prefix:
-                base_prefix = args.diag_prefix
-                if args.tree_name is not None:
-                    base_prefix = f"{base_prefix}_{tree_name}"
-                prefix = base_prefix if len(diag_targets) == 1 else f"{base_prefix}_{model_name}"
-            else:
-                prefix = None
-            html_out = build_diagrams(
-                workbook_path,
-                prefix,
-                output_dir=out_dir,
-                pure=(model_name == "pure"),
-                tree_name=tree_name,
-            )
-            print(f"OK diag ({model_name}): {html_out}")
+        prefix = args.diag_prefix
+        if prefix and args.tree_name is not None:
+            prefix = f"{prefix}_{tree_name}"
+        html_out = build_diagrams(
+            markov_path,
+            prefix,
+            output_dir=out_dir,
+            tree_name=tree_name,
+        )
+        print(f"OK diag (markov): {html_out}")
 
 if __name__ == "__main__": main()
 

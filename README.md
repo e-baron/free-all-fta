@@ -1,468 +1,221 @@
 # free-all-fta
 
-## Aim 
+## Aim
 
-Python tool to create allocative FTA calculations in an Excel workbook and optionally generate SVG/HTML fault-tree diagrams.
+Python tool to create Markov allocative fault-tree calculations in an Excel workbook and optionally generate SVG/HTML fault-tree diagrams.
 
-The repository includes a ready-to-use sample workbook: [free-all-fta-example.xlsx](free-all-fta-example.xlsx).
+This tool provides an iterative approach to identify equipment failure rates and check whether the required safety target is met. It also supports calculations based on mean time to repair (or safe down time).
 
-This FTA tool provides an iterative approach to identify the failure rates of equipment and check whether the required safety target is met. It also allows to check this based on mean time to repair (or safe down time).
+## What the tool does
 
-## What This Tool Does
-
-The script reads an Excel workbook with three sheets:
+The script reads an Excel workbook containing these worksheets:
 
 - `events`
 - `gates`
-- `tree`
+- `tree` (or another worksheet selected with `--tree-name`)
 
-It computes gate-level values from the event/gate hierarchy, writes formulas and result columns back into the workbook, and can generate diagram files.
-
-Two calculation modes are supported:
-
-- **Markov allocative mode** (default)
-- **Pure-probability allocative mode** (`--pure`)
+It calculates gate-level values from the event/gate hierarchy, writes formulas and result columns into the workbook, and can generate diagrams. Markov allocative calculation is the only supported calculation mode.
 
 ## Requirements
 
 - Python 3.9+
 - `openpyxl`
 
-Install dependency:
+Install `openpyxl`:
 
-### On Windows
+### Windows
 
-#### Python installation
+Install Python from PowerShell:
 
-- Open `PowerShell`
-- Execute: 
 ```bash
 winget install Python.Python.3.14
 ```
-- Close `PowerShell`
-- Reopen `PowerShell`
 
-
-#### Library installation
+Then reopen PowerShell and run:
 
 ```bash
 pip install openpyxl
 ```
 
-### On MacOS
+### macOS
 
-#### Python installation
+Install Python with Homebrew:
 
-- Open a Terminal
-- Execute:
 ```bash
 brew update
 brew install python
 ```
 
-
-#### Library installation
+Then install the library:
 
 ```bash
 python3 -m pip install --user --break-system-packages openpyxl
 ```
 
-## Quick Start With The Provided Excel File
+## Quick start
 
-### 1. Run default (Markov) mode
+Run Markov calculations:
 
 ```bash
 python3 free-all-fta.py free-all-fta-example.xlsx
 ```
 
-This creates:
+This creates `free-all-fta-example/free-all-fta-example_alloc.xlsx`.
 
-- `free-all-fta-example/free-all-fta-example_alloc.xlsx`
-
-### 2. Run pure-probability mode
-
-```bash
-python3 free-all-fta.py free-all-fta-example.xlsx --pure
-```
-
-This creates:
-
-- `free-all-fta-example/free-all-fta-example_pure.xlsx`
-
-### 3. Generate diagrams too
+Generate Markov calculations and diagrams:
 
 ```bash
 python3 free-all-fta.py free-all-fta-example.xlsx --diag
 ```
 
-This creates SVG pages and an HTML index in the output directory.
+This creates the output workbook, SVG diagram pages, and an HTML index in the output directory.
 
-## Command Syntax
+## Command syntax
 
 ```bash
 python3 free-all-fta.py <excel-file> [options]
 ```
 
-### Positional argument
-
-- `<excel-file>`: path to the source workbook (for example `free-all-fta-example.xlsx`).
-
 ### Options
 
-- `--alloc`
-	- Backward-compatible no-op.
-	- Allocative mode is already the default.
+- `--alloc`: Backward-compatible no-op; allocative Markov mode is the default.
+- `--markov`: Explicitly selects the only supported calculation mode.
+- `--diag`: Generates Markov FTA diagrams (SVG pages and an HTML index) alongside the workbook.
+- `--tree-name <worksheet>`: Uses the named worksheet as the tree instead of `tree`. It must contain columns such as `L1_ID`. The name is included in automatically generated output filenames.
+- `--alloc-out <path>`: Output workbook path; retained for backward compatibility.
+- `--markov-out <path>`: Alias for `--alloc-out`.
+- `--diag-prefix <text>`: Prefix for generated diagram filenames.
+- `--diag-dir <path>`: Directory for the generated workbook and diagrams. Defaults to a directory based on the input filename.
 
-- `--markov`
-	- Explicitly selects Markov allocative formulas.
-	- This is also the default if `--pure` is not provided.
-
-- `--pure`
-	- Selects pure-probability allocative formulas.
-
-- `--diag`
-	- Generates FTA diagrams (SVG + HTML index) in addition to the output workbook.
-
-- `--tree-name <worksheet>`
-	- Uses the named worksheet as the FTA tree instead of `tree`.
-	- The worksheet must contain tree columns such as `L1_ID`.
-	- When provided, automatic output names include the worksheet name, for example `workbook_MyTree_alloc.xlsx` and `workbook_MyTree_alloc_fta.html`.
-	- It allows you to work with multiple trees in the same Excel workbook.
-
-- `--alloc-out <path>`
-	- Output workbook path for Markov mode.
-	- Kept for backward compatibility.
-
-- `--markov-out <path>`
-	- Alias for `--alloc-out`.
-
-- `--pure-out <path>`
-	- Output workbook path for pure mode.
-
-- `--diag-prefix <text>`
-	- Prefix used for generated diagram filenames.
-
-- `--diag-dir <path>`
-	- Output directory for generated workbook and diagrams.
-	- If omitted, defaults to a folder based on input file name.
-
-### Option compatibility
-
-- `--pure` and `--markov` are mutually exclusive.
-
-## Practical Examples
-
-### Markov + Pure probability diagrams with default naming
+Examples:
 
 ```bash
-python free-all-fta.py free-all-fta-example.xlsx --diag
+python3 free-all-fta.py free-all-fta-example.xlsx --markov-out ./out/markov.xlsx
+python3 free-all-fta.py free-all-fta-example.xlsx --diag --diag-dir ./out/diagrams --diag-prefix projectA
 ```
 
+## Workbook structure
 
-### Pure probability output + diagrams with default naming
+### `events` columns
 
-```bash
-python free-all-fta.py free-all-fta-example.xlsx --pure --diag
-```
-
-### Markov output to a custom file
-
-```bash
-python free-all-fta.py free-all-fta-example.xlsx --markov-out ./out/markov.xlsx
-```
-
-### Pure probability output to a custom file + diagrams in custom folder
-
-```bash
-python free-all-fta.py free-all-fta-example.xlsx --pure --pure-out ./out/pure.xlsx --diag --diag-dir ./out/diagrams --diag-prefix projectA
-```
-
-## Expected Workbook Structure
-
-The tool expects these sheets to exist:
-
-- `events`
-- `gates`
-- `tree`
-
-## Columns Used Per Calculation Mode
-
-Both modes use the same workbook sheets (`events`, `gates`, `tree`).
-
-### Markov mode (`--markov`, default)
-
-Used columns in `events`:
+Required:
 
 - `id`
 - `model_type`
 - `allocated value`
 - `mean_repair_time`
 
-Used columns in `gates`:
+Optional:
+
+- `label` (used in diagrams)
+- `probability` is not required by Markov calculations; Probability events use `allocated value` as their factor.
+- `detection_time` and `negation_time` may be present if used by workbook formulas to derive `mean_repair_time`.
+
+### `gates` columns
+
+Required:
 
 - `id`
 - `formula`
-- `safety target` (used for top-down target propagation and `differences`)
+- `safety target`
 - `calculated frequency`
 - `calculated mean repair time`
 - `differences`
 
-Used columns in `tree`:
+The script creates or updates the `Formula`, `calculated frequency`, `calculated mean repair time`, `differences`, and `calculated probability` columns as needed. `calculated probability` is used for Markov probability-only gates; it does not indicate a separate calculation mode.
 
-- `L1_ID`, `L2_ID`, ... (hierarchy)
-- Optional: `L1_TYPE`, `L2_TYPE`, ... with gate types `AND`/`OR`
+Optional:
 
-### Pure mode (`--pure`)
+- `label` (used in diagrams)
+- `is_paged` (or `is_page`): when set to `True`, the gate is shown as a transfer symbol in its parent diagram and receives a separate SVG page.
 
-Used columns in `events`:
+### `tree` worksheet
 
-- `id`
-- `model_type`
-- `allocated value`
-- `mean_repair_time`
-- Optional for `Probability` model: `probability` (if missing, `allocated value` is used)
+The tree describes the gate/event hierarchy, with one node per row. Hierarchy columns are named `L1_ID`, `L2_ID`, and so on. Optional matching columns `L1_TYPE`, `L2_TYPE`, and so on specify gate types `AND` or `OR`.
 
-Used columns in `gates`:
+## Markov calculations
 
-- `id`
-- `formula`
-- `calculated frequency`
-- `calculated mean repair time`
-- `calculated probability`
-- Optional: `safety target` and `differences` (if present, `differences` is computed)
+### Event interpretation
 
-Used columns in `tree`:
+- `ConstantRate`: `allocated value` is the rate $\\lambda$; `mean_repair_time` is the repair time $T$.
+- `Fixed`: `allocated value` is a fixed frequency $\\lambda$; `mean_repair_time` is ignored and no repair time is produced.
+- `Probability` and `Multiplicity`: `allocated value` is a multiplicative factor in gate calculations.
+- `True` and `False`: factors of $1$ and $0$, respectively.
 
-- `L1_ID`, `L2_ID`, ... (hierarchy)
-- Optional: `L1_TYPE`, `L2_TYPE`, ... with gate types `AND`/`OR`
+### AND gates
 
-## How Formulas Are Built Per Mode
+Rate children with repair times are represented by $(\\lambda_i, T_i)$. Rate children without repair times contribute fixed frequencies $\\lambda_F$; factors multiply the result.
 
-This section explains, for each mode, which inputs are used to build formulas and how gate outputs are calculated.
+With multiple repairable rate children:
 
-### Markov mode (`--markov`, default)
+$$
+\\lambda_{EQ} = \\left(\\prod_i \\lambda_i T_i\\right)\\left(\\sum_i \\frac{1}{T_i}\\right)\\prod_F \\lambda_F \\prod_j f_j,
+\\qquad
+T_{EQ} = \\frac{1}{\\sum_i 1/T_i}.
+$$
 
-Event-level interpretation:
+With one repairable rate child, the frequency is its rate multiplied by fixed-frequency children and factors, and the gate repair time is that child's $T$. If there are no repair-time children, the frequency is the product of fixed frequencies and factors; the calculated repair time is left empty.
 
-- `ConstantRate`:
-	- `allocated value` is interpreted as rate `lambda`.
-	- `mean_repair_time` is interpreted as `T` (the only source of a repair time / `sdt`).
-- `Fixed`:
-	- `allocated value` is interpreted as a fixed frequency `lambda`, with no repair time: `mean_repair_time` is ignored.
-- `Probability` / `Multiplicity`:
-	- `allocated value` is used as a multiplicative factor.
-- `True` / `False`:
-	- factor `1` / `0`.
+### OR gates
 
-Gate formulas:
+The calculated frequency is the sum of rate-child frequencies and factor children. The calculated repair time is computed from rate children with a repair time only:
 
-- `AND` gate:
-	Rate children with a repair time (`ConstantRate` events, or gates with a `calculated mean repair time`) are noted `lambda_i, T_i`. Rate children without one (`Fixed` events, or gates with no `sdt`) are noted `lambda_F`.
-	- With multiple children with a repair time:
-		- `calculated frequency = product(lambda_i * T_i) * sum(1 / T_i) * product(lambda_F) * product(factors)`
-		- `calculated mean repair time = 1 / sum(1 / T_i)`
-		The hazardous state exists only when all child states are simultaneously present. The overlap duration is governed by the shortest restoration process. The harmonic combination: `TEQ = 1 / Σ(1/Ti)` preserves the expected overlap duration.
-	- With one child with a repair time:
-		- `calculated frequency = lambda_1 * product(lambda_F) * product(factors)`
-		- `calculated mean repair time = T_1`
-	- With no child with a repair time (only `Fixed` events/gates without `sdt`, and factors):
-		- `calculated frequency = product(lambda_F) * product(factors)`
-		- `calculated mean repair time` is empty (no `sdt`, no `mdt = 0`).
+$$
+T_{EQ} = \\frac{\\sum_i \\lambda_i T_i}{\\sum_i \\lambda_i}.
+$$
 
-- `OR` gate:
-	- `calculated frequency = sum(rate children lambdas, with or without repair time) + sum(factor children)`
-	- `calculated mean repair time = sum(lambda_i * T_i) / sum(lambda_i)`, empty if no child has a repair time.
-		- Computed from the children with a repair time only. Any child failure can independently create the hazardous state. The gate occurrence rate is therefore the sum of child occurrence rates. The equivalent duration must preserve: `QEQ = λEQ · TEQ`. Therefore the duration is the rate-weighted average persistence time.
+It is left empty when no child has a repair time.
 
-Safety-target propagation and difference:
+### Safety targets
 
-- Along `AND` chains where a parent has exactly one child gate:
-	- `child safety target = parent safety target / product(event child allocated value)`
-- `differences = safety target - calculated frequency`
+Along an AND chain where a parent has exactly one child gate, the child target is propagated as:
 
-Which inputs each calculated gate column depends on:
+$$
+\\text{child safety target} = \\frac{\\text{parent safety target}}{\\prod \\text{event-child allocated values}}.
+$$
 
-- `calculated frequency`:
-	- `events.model_type`
-	- `events.allocated value`
-	- `events.mean_repair_time` (for rate-based children)
-	- `tree.Lx_ID`, `tree.Lx_TYPE`
-- `calculated mean repair time`:
-	- `events.mean_repair_time` (for rate-based children)
-	- `events.allocated value` (for OR weighted average)
-	- `tree.Lx_ID`, `tree.Lx_TYPE`
-- `differences`:
-	- `gates.safety target`
-	- `gates.calculated frequency`
+The `differences` value is `safety target - calculated frequency`. Nonnegative differences are highlighted green; negative differences are highlighted red.
 
-### Pure mode (`--pure`)
+## Probability-only gates
 
-Event-level interpretation:
+A gate whose descendants are only `Probability`, `True`, or `False` events (or other probability-only gates) has no frequency or repair time. An AND gate may also include `Multiplicity` events; an OR gate containing a `Multiplicity` event is not considered probability-only.
 
-- `ConstantRate`:
-	- `lambda = allocated value`
-	- `T = mean_repair_time`
-	- event probability contribution `q_i = 1 - EXP(-(lambda * T))`
-	- event frequency contribution `w_i = lambda`
-- `Fixed`:
-	- `lambda = allocated value`
-	- there is no `T` (`mean_repair_time` is ignored)
-	- event probability contribution `q_i = 1` (neutral in `AND` products; excluded from `OR` sums)
-	- event frequency contribution `w_i = lambda`
-- `Probability`:
-	- `q_i = probability` when the `probability` column exists, otherwise `q_i = allocated value`.
-- `Multiplicity`:
-	- `q_i = allocated value` as a factor in gate probability expressions.
-- `True` / `False`:
-	- `q_i = 1` / `0`.
+For a probability-only gate, `calculated probability` is the child-probability product for AND or sum for OR, capped at 1. The `differences` value compares `safety target` with this probability. Diagrams show the probability value without a frequency or repair time.
 
-Gate formulas (`Fixed` events and gates without `calculated mean repair time` are noted *fixed*; the other children, i.e. `ConstantRate` events, `Probability`/`Multiplicity` factors and gates with a `T`, are noted *q-children*):
+An OR gate must not directly mix probability children (probability-only gates and `Probability`/`True`/`False` events) with frequency children. The script reports the offending gate and children when dimensions are mixed.
 
-- `AND` gate:
-	- `calculated probability = MIN(1, product(q_i of q-children))`
-	- `calculated mean repair time = MAX(T_i)` over the children that have a `T`.
-	 The probability of the hazardous condition is directly computed from the child probabilities. There is no physical rate-weighting mechanism as in Markov theory. A weighted average duration has no probabilistic meaning. The longest child duration is the most representative persistence horizon. Using: `TEQ = MAX(Ti)` is conservative and avoids artificially increasing: `wEQ`
-	- `calculated frequency = raw_product(q_i of q-children) / MAX(T_i) * product(w_fixed)`
-		- Uses raw (uncapped) probability expression for frequency.
-	- If no child has a `T` (no `ConstantRate` below the gate) but there are fixed children, the gate is a Fixed frequency: `calculated frequency = raw_product(factors) * product(w_fixed)`, and `calculated mean repair time` and `calculated probability` are empty (no `t = 0`).
+## Cut sets worksheet
 
-- `OR` gate:
-	- `calculated probability = MIN(1, sum(q_i of q-children))` (fixed children excluded)
-	- `calculated mean repair time = MAX(T_i)` over the children that have a `T`.
-	 The conjunction probability is obtained directly from the child probabilities.No Markov overlap-duration computation is involved. There is no unique mathematically derived equivalent duration.Using: `MAX(Ti)` provides a conservative exposure duration and keeps the interpretation identical to OR gates. It also avoids mixing probabilistic calculations with Markov-derived duration formulas.
-	- `calculated frequency = sum(w_i)` for rate/gate branches
-		- This avoids deriving frequency from a capped probability.
-	- If no child has a `T`, `calculated mean repair time` and `calculated probability` are empty.
+The generated `_alloc.xlsx` workbook includes a `cut-sets` worksheet formatted as an Excel table named `mcs_table`. It lists the minimal cut sets of the tree's top gate(s), sorted by frequency from highest to lowest; cut sets without a computable frequency appear last. `True` events are ignored and `False` events remove the cut sets they belong to. Values are Excel formulas based on the `events` worksheet.
 
-Difference in pure mode:
-
-- If `safety target` and `differences` columns are present:
-	- `differences = safety target - calculated frequency`
-
-Which inputs each calculated gate column depends on:
-
-- `calculated probability`:
-	- `events.model_type`
-	- `events.allocated value`
-	- `events.probability` (optional, only for `Probability` model)
-	- `events.mean_repair_time` (for rate-to-probability conversion)
-	- `tree.Lx_ID`, `tree.Lx_TYPE`
-- `calculated mean repair time`:
-	- `events.mean_repair_time` (for rate/gate branches)
-	- `tree.Lx_ID`, `tree.Lx_TYPE`
-- `calculated frequency`:
-	- `events.allocated value`
-	- `events.mean_repair_time`
-	- child gate `calculated frequency` and `calculated mean repair time`
-	- `tree.Lx_ID`, `tree.Lx_TYPE`
-
-### `events` required columns
-
-- `id`
-- `model_type`
-- `allocated value`
-- `mean_repair_time`
-
-Additional notes:
-
-- In pure mode, if `model_type` is `Probability`, the `probability` column is used when present (otherwise `allocated value` is used).
-- `detection_time` / `negation_time` are not directly required by the calculation engine; they can still be part of your workbook if you use them to derive `mean_repair_time`.
-
-Optional but used when present:
-
-- `label` (used by diagram rendering)
-
-### `gates` required columns
-
-- `id`
-- `formula`
-- `calculated frequency`
-- `calculated mean repair time`
-
-Mode-specific notes:
-
-- Markov mode also uses `safety target` and `differences`.
-- Pure mode also uses `calculated probability`; `safety target`/`differences` are optional but used when present.
-
-The script creates/updates these columns as needed:
-
-- `Formula`
-- `calculated frequency`
-- `calculated mean repair time`
-- `differences`: this is the difference between the `safety target` and the `calculated frequency`. If the `safety target` is met by the calculations based on the provided values in the `events` worksheet, this cell will display a green background.
-- `calculated probability` (pure mode)
-
-Optional but used when present:
-
-- `label` (diagram text)
-- `is_paged` (diagram paging): when `True` is selected, a SVG is provided for this gate. The FTA is cut at this gate: the gate is represented as a triangle in the parent diagram, and a new diagram is provided for the Gate and its children.
-
-### `tree` expected format
-
-This is where you are constructing the hierarchy of gates down to events (the leafs of the tree).
-
-Hierarchy is read from level columns named like:
-
-- `L1_ID`, `L2_ID`, ...
-- optional matching type columns: `L1_TYPE`, `L2_TYPE`, ...
-
-Supported gate types are:
-
-- `AND`
-- `OR`
-
-## Probability-Only Gates
-
-A gate whose children are all `Probability`/`True`/`False` events (or other probability-only gates) has no frequency. An AND gate may also contain `Multiplicity` events (`qEQ = MIN(1, product(qi or mi))`); an OR gate containing a `Multiplicity` event is not a probability-only gate. In both modes (Markov and pure), for such a gate:
-
-- `calculated frequency` and `calculated mean repair time` are left empty.
-- `calculated probability` holds `qEQ = MIN(1, product(qi))` for AND, or `MIN(1, sum(qi))` for OR (the Markov workbook gets this column at the end of the `gates` sheet).
-- `differences` compares the `safety target` with `calculated probability`.
-- Diagrams only show `q = ...` for the gate, and omit `w`/`sdt`/`t`.
-
-When a pure-mode `Probability` event has an empty `probability` cell, its `allocated value` is used.
-
-An OR gate must not mix probability children (probability-only gates, `Probability`/`True`/`False` events) with frequency children (rate events, other gates). The script stops with `ERROR: Mixed dimensions at OR gate ...`, naming the offending gate and children.
-
-## Cut Sets Worksheet
-
-Both generated workbooks (`*_alloc.xlsx` and `*_pure.xlsx`) contain a `cut-sets` worksheet, formatted as an Excel table named `mcs_table`, listing the minimal cut sets (MCS) of the top gate(s) of the tree, sorted by `w` from highest to lowest (cut sets without a computable `w` come last). `True` events are ignored and `False` events remove the cut sets they belong to. Values are live Excel formulas based on the `events` worksheet.
-
-Columns:
+Columns include:
 
 - `order`: number of events in the cut set.
-- `MCS`: the cut set events, one per line, as `id - label` (label omitted if empty).
-- `w (frequency /h)`: frequency of the cut set, computed with the same AND formulas as the mode (Markov or pure).
-- `q (probability)` (pure mode only): `MIN(1, product(qi))` of the cut set.
-- `w (%)`: the cut-set w divided by the overall w result of the top gate (or the sum of top-gate results when the tree has multiple roots).
-- `q (%)` (pure mode only): the cut-set q divided by the overall q result of the top gate(s). It is left blank when the overall result is unavailable or zero.
+- `MCS`: cut-set event IDs and labels, one per line.
+- `w (frequency /h)`: cut-set frequency calculated with the Markov AND formulas.
+- `w (%)`: cut-set frequency divided by the overall frequency of the top gate(s); blank when unavailable or zero.
 
-Percentages are live Excel formulas. The Markov cut-set worksheet includes only `w (%)`; pure mode includes both `w (%)` and `q (%)`. They remain blank when the corresponding overall top-gate result is unavailable or zero. In pure mode, the `w` of an order-1 cut set is the event rate itself.
+## Supported event models
 
-## Supported Event Model Types
+- `ConstantRate` (or `constant_rate`): repairable system represented by a rate and repair time.
+- `Fixed`: fixed frequency with no repair time.
+- `Probability`: event not directly linked to time, such as a human error; used as a factor.
+- `Multiplicity`: number of equipment items, used as a factor.
+- `True`: equivalent to a factor of 1.
+- `False`: equivalent to a factor of 0.
 
-Recognized `model_type` values include:
+## Output files
 
-- `ConstantRate` (or `constant_rate`): to be used when we now that the system is repairable
-- `Fixed`: to be used when we are not sure whether the system is repairable or we want to ignore the time to repair. It never produces a repair time (`sdt` / `t`) in either mode: it is a fixed frequency, and in pure mode its probability contribution is `q = 1`. A gate built only from `Fixed`/`Probability`/`Multiplicity` children is a Fixed frequency with no `calculated mean repair time`
-- `Probability`: to be used when an event is not directly linked to time (e.g. for human errors...)
-- `Multiplicity`: to be used when we want to represent a number of pieces of equipment
-- `True`: this is equivalent to a probability = 1
-- `False`: this is equivalent to a probability = 0
+Depending on the options, output includes:
 
-## Output Files
-
-Depending on options, outputs include:
-
-- Updated workbook (`*_alloc.xlsx` or `*_pure.xlsx`, unless custom path is provided), including the `cut-sets` worksheet
-- Diagram files (`*_fta_*.svg`)
-- Diagram index page (`*_fta.html`)
+- Updated workbook (`*_alloc.xlsx`, unless a custom output path is supplied), including the `cut-sets` worksheet.
+- Diagram files (`*_fta_*.svg`) and an HTML index (`*_fta.html`) when `--diag` is specified.
 
 ## Troubleshooting
 
-- If you get missing-column errors, verify sheet names and column headers exactly.
-- If formulas look stale in Excel, open the output file and force recalculation (the script already requests full calc on load when possible).
-- If diagrams are not needed, omit `--diag` for faster execution.
+- For missing-column errors, verify worksheet names and column headers exactly.
+- If formulas look stale in Excel, open the output workbook and force recalculation; the script requests full recalculation on load when possible.
+- Omit `--diag` when diagrams are not needed.
 
 ## License
 
